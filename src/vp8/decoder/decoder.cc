@@ -25,7 +25,7 @@ enum {
 #endif
 
 template<bool all_neighbors_present, BlockType color,
-         bool horizontal>
+         bool horizontal, class BoolDecoder>
 void decode_one_edge(BlockContext mcontext,
                  BoolDecoder& decoder,
                  ProbabilityTables<all_neighbors_present, color> & probability_tables,
@@ -63,6 +63,7 @@ void decode_one_edge(BlockContext mcontext,
     unsigned int coord = delta;
     for (int lane = 0; lane < 7 && num_nonzeros_edge; ++lane, coord += delta, ++zig15offset) {
         ProbabilityTablesBase::CoefficientContext prior = {0, 0, 0};
+#ifndef USE_SCALAR
         if (ProbabilityTablesBase::MICROVECTORIZE) {
             if (horizontal) {
                 prior = probability_tables.update_coefficient_context8_horiz(coord,
@@ -76,6 +77,9 @@ void decode_one_edge(BlockContext mcontext,
         } else {
             prior = probability_tables.update_coefficient_context8(coord, context, num_nonzeros_edge);
         }
+#else
+        prior = probability_tables.update_coefficient_context8(coord, context, num_nonzeros_edge);
+#endif
         auto exp_array = probability_tables.exponent_array_x(pt,
                                                              coord,
                                                              zig15offset,
@@ -136,7 +140,7 @@ void decode_one_edge(BlockContext mcontext,
     }
 }
 
-template<bool all_neighbors_present, BlockType color>
+template<bool all_neighbors_present, BlockType color, class BoolDecoder>
 void decode_edge(BlockContext mcontext,
                  BoolDecoder& decoder,
                  ProbabilityTables<all_neighbors_present, color> & probability_tables,
@@ -160,7 +164,7 @@ void decode_edge(BlockContext mcontext,
 
 
 
-template<bool all_neighbors_present, BlockType color>
+template<bool all_neighbors_present, BlockType color, class BoolDecoder>
 void parse_tokens(BlockContext context,
                   BoolDecoder& decoder,
                   ProbabilityTables<all_neighbors_present, color> & probability_tables,
@@ -185,17 +189,21 @@ void parse_tokens(BlockContext context,
     for (unsigned int zz = 0; zz < 49 && num_nonzeros_left_7x7; ++zz) {
         unsigned int coord = unzigzag49[zz];
         if ((zz & 7) == 0) {
-#ifdef OPTIMIZED_7x7
+#if defined(OPTIMIZED_7x7)// && !defined(USE_SCALAR)
+#if !defined(USE_SCALAR)
             probability_tables.compute_aavrg_vec(zz, context.copy(), avg.begin());
+#else
+            *((int16_t *)avg.begin()) = probability_tables.compute_aavrg(coord, zz, context.copy());
+#endif
 #endif
         }
         unsigned int b_x = (coord & 7);
         unsigned int b_y = (coord >> 3);
-        assert((coord & 7) > 0 && (coord >> 3) > 0 && "this does the DC and the lower 7x7 AC");
+        dev_assert((coord & 7) > 0 && (coord >> 3) > 0 && "this does the DC and the lower 7x7 AC");
         {
             ProbabilityTablesBase::CoefficientContext prior;
 
-#ifdef OPTIMIZED_7x7
+#if defined(OPTIMIZED_7x7) && !defined(USE_SCALAR)
             prior = probability_tables.update_coefficient_context7x7_precomp(zz, avg[zz & 7], context.copy(), num_nonzeros_left_7x7);
 #else
             prior = probability_tables.update_coefficient_context7x7(coord, zz, context.copy(), num_nonzeros_left_7x7);
@@ -230,7 +238,7 @@ void parse_tokens(BlockContext context,
                     coef = -coef;
                 }
             }
-#ifdef OPTIMIZED_7x7
+#if defined(OPTIMIZED_7x7)// && !defined(USE_SCALAR)
             context.here().coef.at(zz + AlignedBlock::AC_7x7_INDEX) = coef;
 #else
             // this should work in all cases but doesn't utilize that the zz is related
@@ -309,13 +317,26 @@ void parse_tokens(BlockContext context,
                                             context.here().dc());
 }
 #ifdef ALLOW_FOUR_COLORS
-template void parse_tokens(BlockContext, BoolDecoder&, ProbabilityTables<false, BlockType::Ck>&, ProbabilityTablesBase&);
-template void parse_tokens(BlockContext, BoolDecoder&, ProbabilityTables<true, BlockType::Ck>&, ProbabilityTablesBase&);
+template void parse_tokens(BlockContext, VPXBoolReader&, ProbabilityTables<false, BlockType::Ck>&, ProbabilityTablesBase&);
+template void parse_tokens(BlockContext, VPXBoolReader&, ProbabilityTables<true, BlockType::Ck>&, ProbabilityTablesBase&);
 #endif
 
-template void parse_tokens(BlockContext, BoolDecoder&, ProbabilityTables<false, BlockType::Y>&, ProbabilityTablesBase&);
-template void parse_tokens(BlockContext, BoolDecoder&, ProbabilityTables<false, BlockType::Cb>&, ProbabilityTablesBase&);
-template void parse_tokens(BlockContext, BoolDecoder&, ProbabilityTables<false, BlockType::Cr>&, ProbabilityTablesBase&);
-template void parse_tokens(BlockContext, BoolDecoder&, ProbabilityTables<true, BlockType::Y>&, ProbabilityTablesBase&);
-template void parse_tokens(BlockContext, BoolDecoder&, ProbabilityTables<true, BlockType::Cb>&, ProbabilityTablesBase&);
-template void parse_tokens(BlockContext, BoolDecoder&, ProbabilityTables<true, BlockType::Cr>&, ProbabilityTablesBase&);
+template void parse_tokens(BlockContext, VPXBoolReader&, ProbabilityTables<false, BlockType::Y>&, ProbabilityTablesBase&);
+template void parse_tokens(BlockContext, VPXBoolReader&, ProbabilityTables<false, BlockType::Cb>&, ProbabilityTablesBase&);
+template void parse_tokens(BlockContext, VPXBoolReader&, ProbabilityTables<false, BlockType::Cr>&, ProbabilityTablesBase&);
+template void parse_tokens(BlockContext, VPXBoolReader&, ProbabilityTables<true, BlockType::Y>&, ProbabilityTablesBase&);
+template void parse_tokens(BlockContext, VPXBoolReader&, ProbabilityTables<true, BlockType::Cb>&, ProbabilityTablesBase&);
+template void parse_tokens(BlockContext, VPXBoolReader&, ProbabilityTables<true, BlockType::Cr>&, ProbabilityTablesBase&);
+#ifdef ENABLE_ANS_EXPERIMENTAL
+#ifdef ALLOW_FOUR_COLORS
+template void parse_tokens(BlockContext, ANSBoolReader&, ProbabilityTables<false, BlockType::Ck>&, ProbabilityTablesBase&);
+template void parse_tokens(BlockContext, ANSBoolReader&, ProbabilityTables<true, BlockType::Ck>&, ProbabilityTablesBase&);
+#endif
+
+template void parse_tokens(BlockContext, ANSBoolReader&, ProbabilityTables<false, BlockType::Y>&, ProbabilityTablesBase&);
+template void parse_tokens(BlockContext, ANSBoolReader&, ProbabilityTables<false, BlockType::Cb>&, ProbabilityTablesBase&);
+template void parse_tokens(BlockContext, ANSBoolReader&, ProbabilityTables<false, BlockType::Cr>&, ProbabilityTablesBase&);
+template void parse_tokens(BlockContext, ANSBoolReader&, ProbabilityTables<true, BlockType::Y>&, ProbabilityTablesBase&);
+template void parse_tokens(BlockContext, ANSBoolReader&, ProbabilityTables<true, BlockType::Cb>&, ProbabilityTablesBase&);
+template void parse_tokens(BlockContext, ANSBoolReader&, ProbabilityTables<true, BlockType::Cr>&, ProbabilityTablesBase&);
+#endif

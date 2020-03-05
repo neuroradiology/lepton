@@ -9,8 +9,8 @@
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
-#ifndef _SECCOMP_BPF_H_
-#define _SECCOMP_BPF_H_
+#ifndef SECCOMP_BPF_H_
+#define SECCOMP_BPF_H_
 
 #define _GNU_SOURCE 1
 #include <stdio.h>
@@ -77,5 +77,8 @@ struct seccomp_data {
 
 #define KILL_PROCESS \
     BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL)
+
+#define TRACE_PROCESS \
+    BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_TRAP)
 
 #endif /* _SECCOMP_BPF_H_ */

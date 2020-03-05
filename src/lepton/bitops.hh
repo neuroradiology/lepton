@@ -31,22 +31,22 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <assert.h>
 #include <cstring>
-#define RBITS( c, n )		( c & ( 0xFF >> (8 - n) ) )
-#define LBITS( c, n )		( c >> (8 - n) )
-#define MBITS( c, l, r )	( RBITS( c,l ) >> r )
-#define RBITS16( c, n )		( c & ( 0xFFFFFFFF >> (16 - n) ) )
-#define LBITS16( c, n )		( c >> (16 - n) )
+#define RBITS( c, n )		( (c) & ( 0xFF >> (8 - (n)) ) )
+#define LBITS( c, n )		( (c) >> (8 - (n)) )
+#define MBITS( c, l, r )	( RBITS( c,l ) >> (r) )
+#define RBITS16( c, n )		( (c) & ( 0xFFFFFFFF >> (16 - (n)) ) )
+#define LBITS16( c, n )		( (c) >> (16 - (n)) )
 #define MBITS16( c, l, r )	( RBITS16( c,l ) >> r )
-#define RBITS32( c, n )		( c & ( 0xFFFFFFFF >> (32 - n) ) )
-#define LBITS32( c, n )		( c >> (32 - n) )
-#define MBITS32( c, l, r )	( RBITS32( c,l ) >> r )
+#define RBITS32( c, n )		( (c) & ( 0xFFFFFFFF >> (32 - (n)) ) )
+#define LBITS32( c, n )		( (c) >> (32 - (n)) )
+#define MBITS32( c, l, r )	( RBITS32( c,l ) >> (r) )
 
-#define RBITS64( c, n )		(n == 0 ? 0ULL : ( (c) & ( 0xFFFFFFFFFFFFFFFFULL >> (64 - (n)) ) ))
-#define LBITS64( c, n )		( c >> (64 - n) )
+#define RBITS64( c, n )		((n) == 0 ? 0ULL : ( (c) & ( 0xFFFFFFFFFFFFFFFFULL >> (64 - (n)) ) ))
+#define LBITS64( c, n )		( (c) >> (64 - (n)) )
 #define MBITS64( c, l, r )	(((r) >= 64) ? 0 : ( RBITS64( c,l ) >> (r) ))
 
-#define BITN( c, n )		( (c >> n) & 0x1 )
-#define FDIV2( v, p )		( ( v < 0 ) ? -( (-v) >> p ) : ( v >> p ) )
+#define BITN( c, n )		( ((c) >> (n)) & 0x1 )
+#define FDIV2( v, p )		( ( (v) < 0 ) ? -( (-v) >> (p) ) : ( (v) >> (p) ) )
 
 #define BTST_BUFF			1024 * 1024
 
@@ -55,8 +55,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "../io/Reader.hh"
 #include "../io/ioutil.hh"
 #include "../vp8/util/vpx_config.hh"
-
-void compute_md5(const char * filename, unsigned char *result);
 
 /* -----------------------------------------------
 	class to write arrays bitwise
@@ -122,7 +120,7 @@ public:
 
         int nbits2 = nbits;
         unsigned int val2 = val;
-        assert(nbits <= 64);
+        dev_assert(nbits <= 64);
         if ( __builtin_expect(cbyte2 > ( dsize - 16 ), false) ) {
             if (bound_reached()) {
                 return;
@@ -194,7 +192,7 @@ public:
         return cbyte2 >= size_bound;
     }
     uint8_t get_overhang_byte() const {
-        assert(cbit2 > 56);
+        dev_assert(cbit2 > 56);
         uint64_t retval = buf;
         retval >>= 56;
         return (uint8_t) retval;
@@ -212,7 +210,7 @@ public:
         cbit2 = 64 - num_bits;
     }
     void reset() {
-        assert(no_remainder());
+        dev_assert(no_remainder());
         reset_crystallized_bytes();
     }
     void reset_crystallized_bytes() {
@@ -466,15 +464,16 @@ class bounded_iostream
     enum {
         buffer_size = 65536
     };
+    size_t bookkeeping_bytes_written;
     uint8_t buffer[buffer_size];
     uint32_t buffer_position;
     Sirikata::DecoderWriter *parent;
-    unsigned int byte_bound;
-    unsigned int byte_position;
-    unsigned int num_bytes_attempted_to_write;
+    uint32_t byte_bound;
+    uint32_t byte_position;
+    uint32_t num_bytes_attempted_to_write;
     Sirikata::JpegError err;
     std::function<void(Sirikata::DecoderWriter*, size_t)> size_callback;
-    unsigned int write_no_buffer( const void* from, size_t bytes_to_write );
+    uint32_t write_no_buffer( const void* from, size_t bytes_to_write );
 public:
 	bounded_iostream( Sirikata::DecoderWriter * parent,
                       const std::function<void(Sirikata::DecoderWriter*, size_t)> &size_callback,
@@ -483,11 +482,16 @@ public:
     void call_size_callback(size_t size);
     bool chkerr();
     unsigned int getsize();
+    size_t get_bookkeeping_bytes_written() const {
+        return bookkeeping_bytes_written + bytes_written();
+    }
     unsigned int bytes_written()const {
         return std::max(byte_position,
                         std::min(byte_position + buffer_position, byte_bound));
     }
     void set_bound(size_t bound); // bound of zero = fine
+    void prep_for_new_file();
+
     size_t get_bound() const {
         return byte_bound;
     }
@@ -499,7 +503,7 @@ public:
     }
     unsigned int write_byte(uint8_t byte) {
         ++num_bytes_attempted_to_write;
-        assert(buffer_position < buffer_size && "Full buffer wasn't flushed");
+        dev_assert(buffer_position < buffer_size && "Full buffer wasn't flushed");
         buffer[buffer_position++] = byte;
         if (__builtin_expect(buffer_position == buffer_size, 0)) {
             buffer_position = 0;

@@ -28,7 +28,11 @@
  */
 
 #include "Reader.hh"
+#ifdef USE_SYSTEM_DEPENDENCIES
+#include <zlib.h>
+#else
 #include "../../dependencies/zlib/zlib.h"
+#endif
 namespace Sirikata{
 class SIRIKATA_EXPORT ZlibDecoderDecompressionReader : public DecoderReader {
 protected:
@@ -43,7 +47,8 @@ public:
                                  JpegAllocator<uint8_t> >,
                      JpegError> Decompress(const uint8_t *buffer,
                                              size_t size,
-                                             const JpegAllocator<uint8_t> &alloc);
+                                           const JpegAllocator<uint8_t> &alloc,
+                         size_t max_size);
     ZlibDecoderDecompressionReader(DecoderReader *r, bool concatenated, const JpegAllocator<uint8_t> &alloc);
     virtual std::pair<uint32, JpegError> Read(uint8*data, unsigned int size);
     virtual ~ZlibDecoderDecompressionReader();

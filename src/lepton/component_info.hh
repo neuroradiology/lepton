@@ -1,6 +1,6 @@
 /* -*-mode:c++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
-#ifndef _COMPONENT_INFO_HH_
-#define _COMPONENT_INFO_HH_
+#ifndef COMPONENT_INFO_HH_
+#define COMPONENT_INFO_HH_
 struct componentInfo {
 	unsigned short* qtable; // quantization table
 	int huffdc; // no of huffman table (DC)
@@ -16,6 +16,16 @@ struct componentInfo {
 	int nc;  // block count (all) (non interleaved)
 	int sid; // statistical identity
 	int jid; // jpeg internal id
+    componentInfo() {
+        memset(this, 0, sizeof(*this));
+    }
+    void check_valid_value_range() const {
+        always_assert(bch && "zero height");
+        always_assert(bcv && "zero height");
+        always_assert(sfv && "zero sfv");
+        always_assert(sfh && "zero sfh");
+    }
+
 };
 
 #endif

@@ -5,11 +5,12 @@
 #define STRINGIFY_HELPER(x) #x
 #define STRINGIFY(x) STRINGIFY_HELPER(x)
 extern int test_file(int argc, char **argv, bool use_lepton, bool jailed, int inject_syscall_level,
-                     bool allow_progressive_files, bool multithread,
+                     int allow_progressive_files, bool multithread,
                      const std::vector<const char *> &filenames,
                      bool expect_encoder_failure, bool expect_decoder_failure,
                      const char* encode_memory, const char * decode_memory, const char * singlethread_memory,
-                     const char* thread_memory);
+                     const char* thread_memory, bool use_brotli,
+                     bool force_no_ans);
 #ifdef UNJAILED
 #define IS_JAILED false
 #else
@@ -22,13 +23,16 @@ int main (int argc, char **argv) {
     bool use_lepton = false;
     bool expect_failure = false;
     bool expect_decode_failure = false;
-    bool allow_progressive_files = false;
+    int allow_progressive_files = 0;
     bool multithread = true;
 #ifdef SINGLETHREAD
     multithread = false;
 #endif
 #ifdef ALLOW_PROGRESSIVE
-    allow_progressive_files = true;
+    allow_progressive_files = 1;
+#endif
+#ifdef DISALLOW_PROGRESSIVE
+    allow_progressive_files = -1;
 #endif
 #ifdef EXPECT_FAILURE
     expect_failure = true;
@@ -42,6 +46,14 @@ int main (int argc, char **argv) {
     bool enable_jailing = IS_JAILED;
 #ifdef USE_LEPTON
     use_lepton = true;
+#endif
+    bool use_brotli=true;
+#ifdef ZLIB_HEADER
+    use_brotli=false;
+#endif
+    bool force_no_ans = false;
+#ifdef FORCE_NO_ANS
+    force_no_ans = true;
 #endif
     for (int i = 1; i < argc; ++i) {
         if (strstr(argv[i], "-unjailed")) {
@@ -106,5 +118,7 @@ int main (int argc, char **argv) {
                      use_lepton, enable_jailing, INJECT_SYSCALL, allow_progressive_files,
                      multithread, filenames,
                      expect_failure,
-                     expect_decode_failure, encode_memory, decode_memory, singlethread_memory, thread_memory);
+                     expect_decode_failure, encode_memory, decode_memory, singlethread_memory, thread_memory,
+                     use_brotli,
+                     force_no_ans);
 }

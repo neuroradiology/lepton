@@ -10,35 +10,49 @@
 #include "../io/MuxReader.hh"
 #include "../io/ioutil.hh"
 #include "validation.hh"
+#include "generic_compress.hh"
+
 ValidationContinuation validateAndCompress(int *reader,
                                            int *writer,
                                            Sirikata::Array1d<uint8_t, 2> header,
+                                           size_t header_size,
                                            size_t start_byte,
                                            size_t end_byte,
                                            ExitCode *validation_exit_code,
                                            Sirikata::MuxReader::ResizableByteBuffer *lepton_data,
                                            int argc,
                                            const char ** argv,
-                                           bool is_socket) {
+                                           bool is_permissive,
+                                           bool is_socket,
+                                           std::vector<uint8_t> *permissive_jpeg_return) {
+    if (is_permissive){
+        always_assert(permissive_jpeg_return);
+        if (header_size < header.size()) {
+            permissive_jpeg_return->resize(header_size);
+            if (header_size) {
+                memcpy(permissive_jpeg_return->data(), header.data, header_size);
+            }
+            return ValidationContinuation::EVALUATE_AS_PERMISSIVE;
+        }
+    }
 #ifdef _WIN32
     std::vector<const char*> args;
     args.push_back(argv[0]);
     args.push_back("-skiproundtrip");
     for (int i = 1; i < argc; ++i) {
         if (argv[i][0] == '-'
-            && strcmp("argv[i]", "-")
+            && strcmp(argv[i], "-")
             && strstr(argv[i], "-validat") != argv[i]
             && strstr(argv[i], "-verif") != argv[i]
             && strstr(argv[i], "-socket") != argv[i]
             && strstr(argv[i], "-fork") != argv[i]
-            && strstr(argv[i], "-listen") != argv[i]
-            && strstr(argv[i], "-roundtrip") != argv[i]) {
+			&& strstr(argv[i], "-listen") != argv[i]
+			&& strstr(argv[i], "-permissive") != argv[i]
+			&& strstr(argv[i], "-roundtrip") != argv[i]) {
             args.push_back(argv[i]);
         }
     }
     args.push_back("-"); // read from stdin, write to stdout
-    //args.push_back("/Users/daniel/Source/Repos/lepton/images/iphone.jpg");
-    //args.push_back("/Users/daniel/Source/Repos/lepton/test.lep");
     auto encode_pipes = IOUtil::start_subprocess(args.size(), &args[0], false);
     lepton_data->reserve(4096 * 1024);
     size_t size = 0;
@@ -50,6 +64,7 @@ ValidationContinuation validateAndCompress(int *reader,
         encode_pipes.pipe_stdout,
         &size,
         lepton_data,
+        permissive_jpeg_return,
         is_socket);
     auto decode_pipes = IOUtil::start_subprocess(args.size(), &args[0], false);
     size_t roundtrip_size = 0;
@@ -64,7 +79,10 @@ ValidationContinuation validateAndCompress(int *reader,
             &roundtrip_size);
     }
     if (roundtrip_size != size || memcmp(&md5[0], &rtmd5[0], md5.size()) != 0) {
-        fprintf(stderr, "Input Size %ld != Roundtrip Size %ld\n", size, roundtrip_size);
+        if (is_permissive) {
+            return ValidationContinuation::EVALUATE_AS_PERMISSIVE;
+        }
+        fprintf(stderr, "Input Size %lu != Roundtrip Size %lu\n", (unsigned long)size, (unsigned long)roundtrip_size);
         for (size_t i = 0; i < md5.size(); ++i) {
             fprintf(stderr, "%02x", md5[i]);
         }
@@ -73,7 +91,7 @@ ValidationContinuation validateAndCompress(int *reader,
             fprintf(stderr, "%02x", rtmd5[i]);
         }
         fprintf(stderr, "\n");
-        custom_exit(ExitCode::ROUNDTRIP_FAILURE);
+        custom_exit(ExitCode::UNSUPPORTED_JPEG);
     }
 #else
     int jpeg_input_pipes[2] = {-1, -1};
@@ -134,16 +152,22 @@ ValidationContinuation validateAndCompress(int *reader,
                                                                   lepton_output_pipes[0],
                                                                   &size,
                                                                   lepton_data,
+                                                                  permissive_jpeg_return,
                                                                   is_socket);
-
     int status = 0;
     while (waitpid(encode_pid, &status, 0) < 0 && errno == EINTR) {} // wait on encode
     if (WIFEXITED(status)) {
         int exit_code = WEXITSTATUS(status);
         if (exit_code != 0) {
+            if (is_permissive) {
+                return ValidationContinuation::EVALUATE_AS_PERMISSIVE;
+            }
             exit(exit_code);
         }
     } else if (WIFSIGNALED(status)) {
+        if (is_permissive) {
+            return ValidationContinuation::EVALUATE_AS_PERMISSIVE;
+        }
         raise(WTERMSIG(status));
     }
     size_t roundtrip_size = 0;
@@ -158,6 +182,9 @@ ValidationContinuation validateAndCompress(int *reader,
             &roundtrip_size);
     }
     if (roundtrip_size != size || memcmp(&md5[0], &rtmd5[0], md5.size()) != 0) {
+        if (is_permissive) {
+            return ValidationContinuation::EVALUATE_AS_PERMISSIVE;
+        }
         fprintf(stderr, "Input Size %ld != Roundtrip Size %ld\n", size, roundtrip_size);
         for (size_t i = 0; i < md5.size(); ++i) {
             fprintf(stderr, "%02x", md5[i]);            
@@ -175,9 +202,15 @@ ValidationContinuation validateAndCompress(int *reader,
     if (WIFEXITED(status)) {
         int exit_code = WEXITSTATUS(status);
         if (exit_code != 0) {
+            if (is_permissive) {
+                return ValidationContinuation::EVALUATE_AS_PERMISSIVE;
+            }
             exit(exit_code);
         }
     } else if (WIFSIGNALED(status)) {
+        if (is_permissive) {
+            return ValidationContinuation::EVALUATE_AS_PERMISSIVE;
+        }
         raise(WTERMSIG(status));
     }
 #endif

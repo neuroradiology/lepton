@@ -1,5 +1,5 @@
-#ifndef _SIRIKIATA_IO_UTIL_HH_
-#define _SIRIKIATA_IO_UTIL_HH_
+#ifndef SIRIKIATA_IO_UTIL_HH_
+#define SIRIKIATA_IO_UTIL_HH_
 #ifndef _WIN32
 #include <unistd.h>
 #include <sys/errno.h>
@@ -103,20 +103,22 @@ public:
     }
     void Close() {
         if (close_stream) {
-            close(fp); // not always useful (eg during SECCOMP)
+          while (close(fp) == -1 && errno == EINTR){}
+          // not always useful (eg during SECCOMP)
         }
         fp = -1;
     }
     std::pair<Sirikata::uint32, Sirikata::JpegError> Write(const Sirikata::uint8*data, unsigned int size) {
         using namespace Sirikata;
-        size_t data_written = 0;
+                size_t data_written = 0;
         while (data_written < size) {
             signed long nwritten = write(fp, data + data_written, size - data_written);
             if (nwritten <= 0) {
                 if (errno == EINTR) {
                     continue;
                 }
-                return std::pair<Sirikata::uint32, JpegError>(data_written, JpegError::errShortHuffmanData());
+                //        The size_t -> Sirikata::uint32 cast is safe because sizeof(size) is <= sizeof(Sirikata::uint32)
+                return std::pair<Sirikata::uint32, JpegError>(static_cast<Sirikata::uint32>(data_written), JpegError::errShortHuffmanData());
             }
             data_written += nwritten;
         }
@@ -153,6 +155,7 @@ Sirikata::Array1d<uint8_t, 16> transfer_and_md5(Sirikata::Array1d<uint8_t, 2> he
                                                 int input, HANDLE_or_fd input_tee,
                                                 HANDLE_or_fd output, size_t *input_size,
                                                 Sirikata::MuxReader::ResizableByteBuffer *stored_outpt,
+                                                std::vector<uint8_t>*optional_original_input_return,
                                                 bool is_socket);
 
 struct SubprocessConnection {
@@ -161,6 +164,6 @@ struct SubprocessConnection {
     HANDLE_or_fd pipe_stderr;
     int sub_pid;
 };
-SubprocessConnection start_subprocess(int argc, const char **argv, bool pipe_stder);
+SubprocessConnection start_subprocess(int argc, const char **argv, bool pipe_stder, bool stderr_to_nul=false);
 }
 #endif

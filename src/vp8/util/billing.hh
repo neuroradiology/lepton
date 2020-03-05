@@ -1,7 +1,8 @@
-#include "memory.hh"
 #include <atomic>
-#ifndef _BILLING_HH_
-#define _BILLING_HH_
+#include "memory.hh"
+#include "nd_array.hh"
+#ifndef BILLING_HH_
+#define BILLING_HH_
 #define FOREACH_BILLING_TYPE(CB)                \
     CB(HEADER)                                  \
     CB(DELIMITERS)                              \
@@ -54,11 +55,12 @@ inline const char * BillingString(Billing bt) {
     data[3] = (which % 10) + '0';
     return data;
 }
-extern std::atomic<uint32_t> billing_map[2][(uint32_t)Billing::NUM_BILLING_ELEMENTS];
+extern Sirikata::Array1d<typename Sirikata::Array1d<std::atomic<uint32_t>,
+                                                    (uint32_t)Billing::NUM_BILLING_ELEMENTS>, 2> billing_map;
 
 inline void write_bit_bill(Billing bt, bool is_compressed, uint32_t num_bits) {
-#ifndef NDEBUG
-    assert((uint32_t)bt < (uint32_t)Billing::NUM_BILLING_ELEMENTS);
+#if defined(ENABLE_BILLING) || !defined(NDEBUG)
+    dev_assert((uint32_t)bt < (uint32_t)Billing::NUM_BILLING_ELEMENTS);
     if (is_compressed && bt == Billing::HEADER) {
         //fprintf(stderr, "Header; %f bytes\n", num_bits / 8.0);
     }
@@ -71,9 +73,9 @@ inline void write_bit_bill(Billing bt, bool is_compressed, uint32_t num_bits) {
 
 
 inline void write_multi_bit_bill(uint32_t num_bits, bool is_compressed, Billing start_range, Billing end_range) {
-#ifndef NDEBUG
-    assert((uint32_t)start_range < (uint32_t)Billing::NUM_BILLING_ELEMENTS);
-    assert((uint32_t)end_range < (uint32_t)Billing::NUM_BILLING_ELEMENTS);
+#if defined(ENABLE_BILLING) || !defined(NDEBUG)
+    dev_assert((uint32_t)start_range < (uint32_t)Billing::NUM_BILLING_ELEMENTS);
+    dev_assert((uint32_t)end_range < (uint32_t)Billing::NUM_BILLING_ELEMENTS);
     for (uint32_t i = 0;i < num_bits; ++i) {
         ++billing_map[is_compressed ? 1 : 0][std::min(i + (uint32_t)start_range,
                                                       (uint32_t)end_range)]; // only happens in NDEBUG
@@ -81,7 +83,7 @@ inline void write_multi_bit_bill(uint32_t num_bits, bool is_compressed, Billing 
 #endif
 }
 inline void write_byte_bill(Billing bt, bool is_compressed, uint32_t num_bytes) {
-#ifndef NDEBUG
+#if defined(ENABLE_BILLING) || !defined(NDEBUG)
     if (num_bytes) {
         write_bit_bill(bt, is_compressed, num_bytes << 3);
     }
@@ -89,7 +91,7 @@ inline void write_byte_bill(Billing bt, bool is_compressed, uint32_t num_bytes) 
 }
 #undef BILLING_STRING_CB
 inline void write_eob_bill(int coefficient, bool encode, uint32_t num_bits) {
-#ifndef NDEBUG
+#if defined(ENABLE_BILLING) || !defined(NDEBUG)
     uint32_t num_edge_bits = 1;
     uint32_t num_7x7_bits = 1;
     if (coefficient > 46) {
@@ -135,11 +137,11 @@ inline void write_eob_bill(int coefficient, bool encode, uint32_t num_bits) {
 void print_bill(int fd);
 
 inline bool is_edge(int bpos) {
-#ifdef NDEBUG
+#if defined(ENABLE_BILLING) || !defined(NDEBUG)
     (void)bpos;
     return false;
 #else
-    assert(bpos < 64);
+    dev_assert(bpos < 64);
     return bpos == 0 || bpos == 1 || bpos == 5 || bpos == 6 || bpos == 14 || bpos == 15 || bpos == 27 || bpos == 28 || bpos == 2
         || bpos == 3 || bpos == 9 || bpos == 10 || bpos == 20 || bpos == 21 || bpos == 35;
 #endif

@@ -39,8 +39,9 @@ class UncompressedComponents {
     int cmpc_; // the number of components
     int mcuh_;
     int mcuv_;
-    ExtendedComponentInfo header_[4];
-
+	typedef Sirikata::Array1d<ExtendedComponentInfo, 4> ExtendedInfo;
+    ExtendedInfo header_;
+	
     CounterType coefficient_position_progress_;
     CounterType bit_progress_;
     CounterType worker_start_read_signal_;
@@ -110,17 +111,23 @@ public:
                                       BlockBasedImageBase<force_memory_optimized> *framebuffer,
                                       bool memory_optimized=force_memory_optimized) const {
         uint64_t total_req_blocks = 0;
-        for (int cmp = 0; cmp < (int)sizeof(header_)/(int)sizeof(header_[0]) && cmp < cmpc_; cmp++) {
+        for (int cmp = 0; cmp < (int)header_.size() && cmp < cmpc_; cmp++) {
             total_req_blocks += header_[cmp].info_.bcv * header_[cmp].info_.bch;
         }
-        for (int cmp = 0; cmp < (int)sizeof(header_)/(int)sizeof(header_[0]) && cmp < cmpc_; cmp++) {
+        for (int cmp = 0; cmp < (int)header_.size() && cmp < cmpc_; cmp++) {
             int bc_allocated = header_[cmp].info_.bc;
             int64_t max_cmp_bc = max_number_of_blocks;
             max_cmp_bc *= header_[cmp].info_.bcv;
             max_cmp_bc *= header_[cmp].info_.bch;
-            max_cmp_bc /= total_req_blocks;
+            if (total_req_blocks) {
+                max_cmp_bc /= total_req_blocks;
+            }
             if (bc_allocated > max_cmp_bc) {
-                bc_allocated = max_cmp_bc - (max_cmp_bc % header_[cmp].info_.bch);
+                int rem = 0;
+                if (header_[cmp].info_.bch) {
+                    rem = (max_cmp_bc % header_[cmp].info_.bch);
+                }
+                bc_allocated = max_cmp_bc - rem;
             }
             if (cmp == desired_cmp) {
                 framebuffer->init(header_[cmp].info_.bch,
@@ -131,7 +138,7 @@ public:
             }
         }
     }
-    void init(componentInfo cmpinfo[ sizeof(header_)/sizeof(header_[0]) ], int cmpc,
+    void init(Sirikata::Array1d<componentInfo, ExtendedInfo::size0> cmpinfo, int cmpc,
               int mcuh, int mcuv, bool memory_optimized_image) {
         mcuh_ = mcuh;
         mcuv_ = mcuv;
@@ -141,7 +148,7 @@ public:
             const char * errmsg = "We only support 3 color channels or fewer\n";
             int err = write(2, errmsg, strlen(errmsg));
             (void)err;
-            assert(cmpc <= (int)ColorChannel::NumBlockTypes && "We only support 3 color channels or less");
+            dev_assert(cmpc <= (int)ColorChannel::NumBlockTypes && "We only support 3 color channels or less");
             custom_exit(ExitCode::UNSUPPORTED_4_COLORS);
         }
         cmpc_ = cmpc;
@@ -180,7 +187,7 @@ public:
         while (bit >= (bit_progress_ += 0)) {
             CodingReturnValue retval = do_more_work();
             if (retval == CODING_ERROR) {
-                assert(false && "Incorrectly coded item");
+                dev_assert(false && "Incorrectly coded item");
                 custom_exit(ExitCode::CODING_ERROR);
             }
             //fprintf(stderr, "Waiting for bit %d > %d\n", bit, bit_progress_ += 0);
@@ -190,7 +197,7 @@ public:
         while (bpos >= (coefficient_position_progress_ += 0)) {
             CodingReturnValue retval = do_more_work();
             if (retval == CODING_ERROR) {
-                assert(false && "Incorrectly coded item");
+                dev_assert(false && "Incorrectly coded item");
                 custom_exit(ExitCode::CODING_ERROR);
             }
             //fprintf(stderr, "Waiting for coefficient_position %d > %d\n", bpos, coefficient_position_progress_ += 0);
@@ -201,7 +208,7 @@ public:
         while (dpos >= (header_[cmp].dpos_block_progress_ += 0)) {
             CodingReturnValue retval = do_more_work();
             if (retval == CODING_ERROR) {
-                assert(false && "Incorrectly coded item");
+                dev_assert(false && "Incorrectly coded item");
                 custom_exit(ExitCode::CODING_ERROR);
             }
         }

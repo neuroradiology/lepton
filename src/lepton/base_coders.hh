@@ -31,6 +31,7 @@ class BaseDecoder {
     virtual CodingReturnValue decode_chunk(UncompressedComponents*dst) = 0;
     virtual void registerWorkers(GenericWorker * workers, unsigned int num_workers) = 0;
     virtual GenericWorker* getWorker(unsigned int i) = 0;
+    virtual unsigned int getNumWorkers()const = 0;
     virtual std::vector<ThreadHandoff> initialize_baseline_decoder(const UncompressedComponents * const colldata,
                                              Sirikata::Array1d<BlockBasedImagePerChannel<true>,
                                                                MAX_NUM_THREADS>& framebuffer) = 0;
@@ -43,7 +44,10 @@ class BaseDecoder {
                             int curr_y) = 0;
     virtual size_t get_model_memory_usage() const = 0;
     virtual size_t get_model_worker_memory_usage() const = 0;
+    virtual void flush() = 0;
+    virtual void map_logical_thread_to_physical_thread(int thread_id, int target_thread_state) = 0;
     virtual void clear_thread_state(int thread_id, int target_thread_state, BlockBasedImagePerChannel<true>& framebuffer) = 0;
+    virtual void reset_all_comm_buffers() = 0;
 };
 
 

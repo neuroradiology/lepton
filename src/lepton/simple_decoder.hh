@@ -19,6 +19,10 @@ public:
 
     CodingReturnValue decode_chunk(UncompressedComponents* colldata);
     virtual void registerWorkers(GenericWorker *, unsigned int num_workers) {}
+    unsigned int getNumWorkers() const {
+        return 0;
+    }
+    void reset_all_comm_buffers(){}
     GenericWorker *getWorker(unsigned int i) {
         return NULL;
     }
@@ -36,6 +40,8 @@ public:
                     int curr_y);
 
     virtual void clear_thread_state(int thread_id, int target_thread_state, BlockBasedImagePerChannel<true>& framebuffer) {}
+    virtual void flush(){}
+    virtual void map_logical_thread_to_physical_thread(int thread_id, int target_thread_state) {}
     size_t get_model_memory_usage() const {
         return 0;
     }

@@ -37,24 +37,9 @@ reading and writing of arrays
 #include <fcntl.h>
 #include <algorithm>
 #include <assert.h>
-extern "C" {
-#include "../../dependencies/md5/md5.h"
-}
 #include "bitops.hh"
 
 #define BUFFER_SIZE 1024 * 1024
-void compute_md5(const char * filename, unsigned char *result) {
-    FILE * fp = fopen(filename, "rb");
-    size_t data_read;
-    char buffer[128 * 1024];
-    MD5_CTX ctx;
-    MD5_Init(&ctx);
-    do {
-        data_read = fread(buffer, 1, sizeof(buffer), fp);
-        MD5_Update(&ctx, buffer, data_read);
-    }while(data_read > 0);
-    MD5_Final(result, &ctx);
-}
 /* -----------------------------------------------
 	constructor for abitreader class
 	----------------------------------------------- */	
@@ -66,6 +51,7 @@ abitreader::abitreader( unsigned char* array, int size )
     data2 = array;
 	eof = false;
 	lbyte = size;
+    buf = 0;
 }
 
 /* -----------------------------------------------
@@ -368,8 +354,10 @@ bounded_iostream::bounded_iostream(Sirikata::DecoderWriter *w,
                                    const Sirikata::JpegAllocator<uint8_t> &alloc) 
     : parent(w), err(Sirikata::JpegError::nil()) {
     this->size_callback = size_callback;
+    bookkeeping_bytes_written = 0;
     buffer_position = 0;
     byte_position = 0;
+    byte_bound = 0x7FFFFFFF;
     num_bytes_attempted_to_write = 0;
     set_bound(0);
 }
@@ -379,9 +367,19 @@ void bounded_iostream::call_size_callback(size_t size) {
 bool bounded_iostream::chkerr() {
     return err != Sirikata::JpegError::nil();
 }
-
+void bounded_iostream::prep_for_new_file() {
+    buffer_position = 0;
+    byte_position = 0;
+    byte_bound = 0x7FFFFFFF;;
+    num_bytes_attempted_to_write = 0;
+    set_bound(0);
+    
+}
 void bounded_iostream::set_bound(size_t bound) {
     flush();
+    if (num_bytes_attempted_to_write > byte_bound) {
+        num_bytes_attempted_to_write = byte_bound;
+    }
     byte_bound = bound;
 }
 void bounded_iostream::flush() {
@@ -395,10 +393,11 @@ void bounded_iostream::close() {
     parent->Close();
 }
 
-unsigned int bounded_iostream::write_no_buffer(const void *from, size_t bytes_to_write) {
+uint32_t bounded_iostream::write_no_buffer(const void *from, size_t bytes_to_write) {
     //return iostream::write(from,tpsize,dtsize);
     std::pair<unsigned int, Sirikata::JpegError> retval;
     if (byte_bound != 0 && byte_position + bytes_to_write > byte_bound) {
+        always_assert(byte_position <= byte_bound); // otherwise we already wrote too much
         size_t real_bytes_to_write = byte_bound - byte_position;
         byte_position += real_bytes_to_write;
         retval = parent->Write(reinterpret_cast<const unsigned char*>(from), real_bytes_to_write);
@@ -456,7 +455,7 @@ ibytestream::ibytestream(Sirikata::DecoderReader *p, unsigned int byte_offset,
 }
 
 unsigned int ibytestream::read(unsigned char*output, unsigned int size) {
-    assert(size);
+    dev_assert(size);
     if (size == 1) {
         return read_byte(output) ? 1 : 0;
     }

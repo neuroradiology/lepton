@@ -1,11 +1,13 @@
-#ifndef _JPEG_META_HH
-#define _JPEG_META_HH
+#ifndef JPEG_META_HH
+#define JPEG_META_HH
 
 #include <vector>
 #include <type_traits>
 #ifndef __APPLE__
+#ifndef BSD
 #ifndef _WIN32
 #include <endian.h>
+#endif
 #endif
 #endif
 static const unsigned char zigzag[] =

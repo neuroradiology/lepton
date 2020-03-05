@@ -33,8 +33,8 @@
  * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-#ifndef _MEM_MGR_ALLOCATOR_HH_
-#define _MEM_MGR_ALLOCATOR_HH_
+#ifndef MEM_MGR_ALLOCATOR_HH_
+#define MEM_MGR_ALLOCATOR_HH_
 
 #include "DecoderPlatform.hh"
 namespace Sirikata {
@@ -63,7 +63,7 @@ SIRIKATA_FUNCTION_EXPORT void memmgr_print_stats();
 SIRIKATA_FUNCTION_EXPORT size_t memmgr_size_allocated();
 SIRIKATA_FUNCTION_EXPORT size_t memmgr_total_size_ever_allocated();
 SIRIKATA_FUNCTION_EXPORT size_t memmgr_size_left();
-
+SIRIKATA_FUNCTION_EXPORT void memmgr_tally_external_bytes(ptrdiff_t bytes);
 }
 namespace Sirikata {
 SIRIKATA_FUNCTION_EXPORT void *MemMgrAllocatorMalloc(void *opaque, size_t nmemb, size_t size);

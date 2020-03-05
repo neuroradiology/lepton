@@ -53,7 +53,7 @@ std::vector<uint8_t,
     strm.next_in = (Bytef*)buffer;
     int ret = deflateInit(&strm, 9);
     if (ret != Z_OK) {
-        assert(false && "LZMA Incorrectly installed");
+        always_assert(false && "LZMA Incorrectly installed");
         exit(1); // lzma not installed properly
     }
     strm.avail_in = size;
@@ -74,7 +74,8 @@ std::vector<uint8_t,
     return retval;
 }
 std::pair<std::vector<uint8_t, JpegAllocator<uint8_t> >,
-          JpegError > ZlibDecoderDecompressionReader::Decompress(const uint8_t *buffer, size_t size, const JpegAllocator<uint8_t> &alloc) {
+          JpegError > ZlibDecoderDecompressionReader::Decompress(const uint8_t *buffer, size_t size, const JpegAllocator<uint8_t> &alloc,
+                                                                 size_t max_file_size) {
     z_stream strm;
     memset(&strm, 0, sizeof(z_stream));
     JpegAllocator<uint8_t> local_alloc;
@@ -113,7 +114,11 @@ std::pair<std::vector<uint8_t, JpegAllocator<uint8_t> >,
             }
             if (strm.avail_out == 0) {
                 retval_size += avail_bytes - strm.avail_out;
-                retval.first.resize(retval.first.size() * 2);
+                if (retval.first.size() >= max_file_size) {
+                    retval.second = JpegError::errShortHuffmanData();
+                    break;
+                }
+                retval.first.resize(std::min(retval.first.size() * 2, max_file_size));
                 avail_bytes = retval.first.size() - retval_size;
 
                 strm.next_out = retval.first.data() + retval_size;
@@ -143,10 +148,10 @@ ZlibDecoderDecompressionReader::ZlibDecoderDecompressionReader(DecoderReader *r,
     if (ret != Z_OK) {
         switch(ret) {
           case Z_MEM_ERROR:
-            assert(ret == Z_OK && "the stream decoder had insufficient memory");
+            always_assert(ret == Z_OK && "the stream decoder had insufficient memory");
             break;
           default:
-            assert(ret == Z_OK && "the stream decoder was not initialized properly");
+            always_assert(ret == Z_OK && "the stream decoder was not initialized properly");
         }
     }
 }
@@ -187,10 +192,10 @@ std::pair<uint32, JpegError> ZlibDecoderDecompressionReader::Read(uint8*data,
                 return std::pair<uint32, JpegError>(size - mStream.avail_out,
                                                     MakeJpegError("Corrupt xz file"));
               case Z_MEM_ERROR:
-                assert(false && "Memory allocation failed");
+                always_assert(false && "Memory allocation failed");
                 break;
               default:
-                assert(false && "Unknown LZMA error code");
+                always_assert(false && "Unknown LZMA error code");
             }
         }
     }
@@ -225,19 +230,19 @@ ZlibDecoderCompressionWriter::ZlibDecoderCompressionWriter(DecoderWriter *w,
     if (ret != Z_OK) {
         switch(ret) {
           case Z_MEM_ERROR:
-            assert(ret == Z_OK && "the stream decoder had insufficient memory");
+            always_assert(ret == Z_OK && "the stream decoder had insufficient memory");
             break;
           case Z_STREAM_ERROR:
-            assert(ret == Z_OK && "Specified integrity check but not supported");
+            always_assert(ret == Z_OK && "Specified integrity check but not supported");
           default:
-            assert(ret == Z_OK && "the stream decoder was not initialized properly");
+            always_assert(ret == Z_OK && "the stream decoder was not initialized properly");
         }
     }
 }
 
 
 void ZlibDecoderCompressionWriter::Close(){
-    assert(!mClosed);
+    always_assert(!mClosed);
     mClosed = true;
     while(true) {
         int ret = deflate(&mStream, Z_FINISH);
@@ -288,7 +293,7 @@ ZlibDecoderCompressionWriter::~ZlibDecoderCompressionWriter() {
     if (!mClosed) {
         Close();
     }
-    assert(mClosed);
+    always_assert(mClosed);
 }
 
 

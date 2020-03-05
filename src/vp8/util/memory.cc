@@ -1,4 +1,7 @@
+#ifndef USE_SCALAR
 #include <immintrin.h>
+#endif
+
 #include "options.hh"
 #include "memory.hh"
 #ifdef _WIN32
@@ -7,10 +10,10 @@
 #include <unistd.h>
 #endif
 #include <errno.h>
-#ifdef __linux
+#ifdef __linux__
 #include <sys/syscall.h>
 #endif
-#ifdef _WIN32
+#if defined(_WIN32) || defined(EMSCRIPTEN)
 #define USE_STANDARD_MEMORY_ALLOCATORS
 #endif
 #if defined(__APPLE__) || (__cplusplus <= 199711L && !defined(_WIN32))
@@ -55,16 +58,27 @@ void always_assert_exit(bool value, const char * expr, const char * file, int li
 }
 void* custom_malloc (size_t size) {
 #ifdef USE_STANDARD_MEMORY_ALLOCATORS
-#ifdef _WIN32
+    Sirikata::memmgr_tally_external_bytes(size);
+#if defined(_WIN32)
     return _aligned_malloc(size, 32);
+#elif defined(EMSCRIPTEN)
+    return memalign(32, size);
 #else
-    return posix_memalign(32, size);
+    void *ptr;
+    int retval = posix_memalign(&ptr, 32, size);
+    if (!g_use_seccomp) {
+        dev_assert(retval == 0 && "posix_memalign returned non-zero");
+    }
+    if (retval != 0) {
+        custom_exit(ExitCode::MALLOCED_NULL);
+    }
+    return ptr;
 #endif
 #else
     void * retval = Sirikata::memmgr_alloc(size);
     if (retval == 0) {// did malloc succeed?
         if (!g_use_seccomp) {
-            assert(false && "Out of memory error");
+            dev_assert(false && "Out of memory error");
         }
         custom_exit(ExitCode::OOM); // ran out of memory
     }
@@ -88,7 +102,7 @@ void* custom_realloc (void * old, size_t size) {
     void * retval = Sirikata::MemMgrAllocatorRealloc(old, size, &actual_size, true, NULL);
     if (retval == 0) {// did malloc succeed?
         if (!g_use_seccomp) {
-            assert(false && "Out of memory error");
+            dev_assert(false && "Out of memory error");
         }
         custom_exit(ExitCode::OOM); // ran out of memory
     }
@@ -106,15 +120,25 @@ void custom_free(void* ptr) {
     Sirikata::memmgr_free(ptr);
 #endif
 }
+
+/**
+ * Zero out a 32byte chunk of memmory.
+ * If AVX2 is enabled using 256bit vector instructions
+ * If SSE is enabled use 128bit vector instructions
+ * Otherwise use plain old memset
+ */
 void * bzero32(void *aligned_32) {
 #if __AVX2__
     _mm256_store_si256((__m256i*)aligned_32, _mm256_setzero_si256());
-#else
+#elif !defined(USE_SCALAR)
     _mm_store_si128((__m128i*)aligned_32, _mm_setzero_si128());
     _mm_store_si128(((__m128i*)aligned_32) + 1, _mm_setzero_si128());
+#else
+    memset(aligned_32, 0, 32);
 #endif
     return aligned_32;
 }
+
 void * custom_calloc(size_t size) {
 #ifdef USE_STANDARD_MEMORY_ALLOCATORS
 #ifdef _WIN32
@@ -126,7 +150,7 @@ void * custom_calloc(size_t size) {
     void * retval = Sirikata::memmgr_alloc(size); // guaranteed to return 0'd memory
     if (retval == 0) {// did malloc succeed?
         if (!g_use_seccomp) {
-            assert(false && "Out of memory error");
+            dev_assert(false && "Out of memory error");
         }
         custom_exit(ExitCode::OOM); // ran out of memory
     }
@@ -135,7 +159,7 @@ void * custom_calloc(size_t size) {
 }
 }
 bool g_use_seccomp =
-#ifndef __linux
+#ifndef __linux__
     false
 #else
     true
@@ -145,7 +169,7 @@ void* operator new (size_t size) throw(std::bad_alloc){
  void* ptr = custom_malloc(size); 
  if (ptr == 0) {// did malloc succeed?
      if (!g_use_seccomp) {
-         assert(false && "Out of memory error");
+         dev_assert(false && "Out of memory error");
      }
      custom_exit(ExitCode::OOM); // ran out of memory
  }
@@ -156,7 +180,7 @@ void* operator new[] (size_t size) throw(std::bad_alloc){
  void* ptr = custom_malloc(size); 
  if (ptr == 0) {// did malloc succeed?
      if (!g_use_seccomp) {
-         assert(false && "Out of memory error");
+         dev_assert(false && "Out of memory error");
      }
      custom_exit(ExitCode::OOM); // ran out of memory
  }
@@ -174,7 +198,7 @@ THREAD_LOCAL_STORAGE void (*atexit_f)(void*, uint64_t) = nullptr;
 THREAD_LOCAL_STORAGE void *atexit_arg0 = nullptr;
 THREAD_LOCAL_STORAGE uint64_t atexit_arg1 = 0;
 void custom_atexit(void (*atexit)(void*, uint64_t) , void *arg0, uint64_t arg1) {
-    assert(!atexit_f);
+    dev_assert(!atexit_f);
     atexit_f = atexit;
     atexit_arg0 = arg0;
     atexit_arg1 = arg1;
@@ -188,7 +212,7 @@ void close_thread_handle() {
     }
 }
 void set_close_thread_handle(int handle) {
-    assert(l_emergency_close_signal == -1);
+    dev_assert(l_emergency_close_signal == -1);
     l_emergency_close_signal = handle;
 }
 void reset_close_thread_handle() {
@@ -197,7 +221,7 @@ void reset_close_thread_handle() {
 
 void custom_terminate_this_thread(uint8_t exit_code) {
     close_thread_handle();
-#ifdef __linux
+#ifdef __linux__
     syscall(SYS_exit, exit_code);
 #endif
 }
@@ -215,7 +239,7 @@ void custom_exit(ExitCode exit_code) {
               && errno == EINTR) {
         }
     }
-#ifdef __linux
+#ifdef __linux__
     syscall(SYS_exit, (int)exit_code);
 #else
     exit((int)exit_code);

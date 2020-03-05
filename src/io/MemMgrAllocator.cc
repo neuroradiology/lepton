@@ -47,8 +47,13 @@
 #include <atomic>
 #define THREAD_LOCAL_STORAGE thread_local
 #endif
-
+#ifdef DEBUG_MEMMGR
+volatile int last_adj = 0;
+#endif
 namespace Sirikata {
+
+void memmgr_free_helper(void*, bool);
+
 using std::size_t;
 union mem_header_union
 {
@@ -108,18 +113,20 @@ MemMgrState& get_local_memmgr(){
     if (!id) {
         memmgr_thread_id_plus_one = id = ++memmgr_allocated_threads;
         if (id > (int)memmgr_num_memmgrs) {
-            assert(false && "Too many threads have requested access to memory-managers:"
+            always_assert(false && "Too many threads have requested access to memory-managers:"
                    "init with higher thread count");
-            custom_exit(ExitCode::ASSERTION_FAILURE);
         }
     }
     return memmgrs[id - 1];
 }
 /// caution: need to call this once per thread
 void memmgr_destroy() {
+#ifdef USE_STANDARD_MEMORY_ALLOCATORS
+    return;
+#endif
     memmgr_thread_id_plus_one = 0; // only clears this thread
     if (memmgrs) {
-#if defined(USE_MMAP) && defined(__linux) // only linux guarantees all zeros
+#if defined(USE_MMAP) && defined(__linux__) // only linux guarantees all zeros
         if (!memmgrs->used_calloc) {
             munmap(memmgrs, memmgr_bytes_allocated);
         } else 
@@ -151,6 +158,9 @@ void setup_memmgr(MemMgrState& memmgr, uint8_t *data, size_t size) {
 }
 void memmgr_init(size_t main_thread_pool_size, size_t worker_thread_pool_size, size_t num_workers, size_t x_min_pool_alloc_quantas, bool needs_huge_pages)
 {
+#ifdef USE_STANDARD_MEMORY_ALLOCATORS
+    return;
+#endif
 #ifdef __APPLE__
     // in apple, the thread_local storage winds up different when destroying the thread
     num_workers *= 2;
@@ -162,7 +172,7 @@ void memmgr_init(size_t main_thread_pool_size, size_t worker_thread_pool_size, s
     size_t total_size = pool_overhead_size + main_thread_pool_size + worker_thread_pool_size * num_workers;
     uint8_t * data = NULL;
     bool used_calloc = false;
-#if defined(USE_MMAP) && defined(__linux) // only linux guarantees all zeros
+#if defined(USE_MMAP) && defined(__linux__) // only linux guarantees all zeros
     if (needs_huge_pages) {
         data = (uint8_t*)mmap(NULL, total_size, PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_HUGETLB, -1, 0);
         if (data == MAP_FAILED) {
@@ -184,7 +194,7 @@ void memmgr_init(size_t main_thread_pool_size, size_t worker_thread_pool_size, s
         data = (uint8_t*)calloc(total_size, 1);
     }
     if (!data) {
-        fprintf(stderr, "Insufficient memory: unable to mmap or calloc %ld bytes\n", total_size);
+        fprintf(stderr, "Insufficient memory: unable to mmap or calloc %lu bytes\n", (unsigned long)total_size);
         fflush(stderr);
         exit(37);
     }
@@ -217,15 +227,19 @@ size_t memmgr_size_left() {
 size_t memmgr_total_size_ever_allocated() {
   return bytes_ever_allocated.load();
 }
-
+void memmgr_tally_external_bytes(ptrdiff_t bytes) {
+    bytes_ever_allocated += bytes;
+    bytes_currently_used += bytes;
+}
 void memmgr_print_stats()
 {
     MemMgrState& memmgr = get_local_memmgr();
     (void)memmgr;
-    #ifdef DEBUG_MEMMGR_SUPPORT_STATS
+#ifdef DEBUG_MEMMGR_SUPPORT_STATS
     mem_header_t* p;
 
     printf("------ Memory manager stats ------\n\n");
+    printf("Workers consumed: %d\n", memmgr_allocated_threads.load());
     printf(    "Memmgr.Pool: free_pos = %lu (%lu uint8_ts left)\n\n",
             memmgr.pool_free_pos, memmgr.pool_size - memmgr.pool_free_pos);
 
@@ -281,7 +295,7 @@ static mem_header_t* get_mem_from_pool(MemMgrState& memmgr, size_t nquantas, mem
     {
         h = (mem_header_t*) (memmgr.pool + memmgr.pool_free_pos);
         h->s.size = nquantas;
-        memmgr_free((void*) (h + 1));
+        memmgr_free_helper((void*) (h + 1), false);
         memmgr.pool_free_pos += total_req_size;
         bytes_currently_used += total_req_size;
     }
@@ -326,7 +340,6 @@ void* memmgr_alloc(size_t nuint8_ts)
     mem_header_t* blessed_zero = NULL;
     mem_header_t* p;
     mem_header_t* prevp;
-
     // Calculate how many quantas are required: we need enough to house all
     // the requested uint8_ts, plus the header. The -1 and +1 are there to make sure
     // that if nuint8_ts is a multiple of nquantas, we don't allocate too much
@@ -367,12 +380,19 @@ void* memmgr_alloc(size_t nuint8_ts)
             }
 
             memmgr.freep = prevp;
+#ifdef DEBUG_MEMMGR
+            last_adj =  p->s.size * sizeof(mem_header_t);
+            fprintf(stderr, "%08ld ALLOC\n", p->s.size * sizeof(mem_header_t));
+#endif
             if (blessed_zero == p) {
-                assert(is_zero(p + 1, nuint8_ts) && "The item returned from the new pool must be zero");
+                dev_assert(is_zero(p + 1, nuint8_ts) && "The item returned from the new pool must be zero");
                 return p + 1;
             } else {
 #ifndef _WIN32
                 (void)is_zero;
+#endif
+#ifdef DEBUG_MEMMGR
+                last_adj = 0;
 #endif
                 return memset((p + 1), 0, nuint8_ts); // this makes sure we always return zero'd data
             }
@@ -394,20 +414,33 @@ void* memmgr_alloc(size_t nuint8_ts)
 #ifdef MEMMGR_EXIT_OOM
                 custom_exit(ExitCode::TOO_MUCH_MEMORY_NEEDED);
 #endif
-
+#ifdef DEBUG_MEMMGR
+                last_adj = 0;
+#endif
                 return 0;
             }
         }
     }
+#ifdef DEBUG_MEMMGR
+    last_adj = std::max(nquantas, min_pool_alloc_quantas)
+      * sizeof(mem_header_t);
+    fprintf(stderr, "%08ld ALLOC\n", std::max(nquantas, min_pool_alloc_quantas)
+            * sizeof(mem_header_t));
+    last_adj = 0;
+#endif
 }
-
 
 // Scans the free list, starting at memmgr.freep, looking the the place to insert the
 // free block. This is either between two existing blocks or at the end of the
 // list. In any case, if the block being freed is adjacent to either neighbor,
 // the adjacent blocks are combined.
 //
-void memmgr_free(void* ap)
+void memmgr_free(void* ap){
+    memmgr_free_helper(ap, true);
+}
+
+// same as memmgr_free but with some differences in debug logging
+void memmgr_free_helper(void* ap, bool actually_free)
 {
     MemMgrState& memmgr = get_local_memmgr();
     if ((uint8_t*)ap >= memmgr.pool + memmgr.pool_size
@@ -423,8 +456,13 @@ void memmgr_free(void* ap)
 
     // acquire pointer to block header
     block = ((mem_header_t*) ap) - 1;
-
-    // Find the correct place to place the block in (the free list is sorted by
+#ifdef DEBUG_MEMMGR
+    if (actually_free) {
+        fprintf(stderr, "%08ld FREE\n", block->s.size * sizeof(mem_header_t));
+        last_adj = -(int)(block->s.size * sizeof(mem_header_t));
+    }
+#endif
+   // Find the correct place to place the block in (the free list is sorted by
     // address, increasing order)
     //
     for (p = memmgr.freep; !(block > p && block < p->s.next); p = p->s.next)
@@ -463,6 +501,11 @@ void memmgr_free(void* ap)
     }
 
     memmgr.freep = p;
+#ifdef DEBUG_MEMMGR
+    if (actually_free) {
+    last_adj = 0;
+    }
+#endif
 }
 
 
@@ -474,7 +517,7 @@ void MemMgrAllocatorFree (void *opaque, void *ptr) {
     memmgr_free(ptr);
 }
 void * MemMgrAllocatorInit(size_t prealloc_size, size_t worker_size, size_t num_workers, unsigned char alignment, bool needs_huge_pages) {
-    assert(alignment <= sizeof(mem_header_union::Align));
+    dev_assert(alignment <= sizeof(mem_header_union::Align));
     memmgr_init(prealloc_size, worker_size, num_workers, 256, needs_huge_pages);
     return memmgr_alloc(1);
 }

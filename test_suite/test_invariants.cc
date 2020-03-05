@@ -1,13 +1,19 @@
+#include <stdio.h>
 #include <assert.h>
 #include <cstdint>
 #include <cstddef>
 #include "../src/vp8/util/nd_array.hh"
 #include "../src/vp8/model/numeric.hh"
+#include "../src/vp8/model/branch.hh"
 #include "../src/io/MuxReader.hh"
 #include "../src/io/MemReadWriter.hh"
 #include "../src/lepton/thread_handoff.hh"
-
-#include <stdio.h>
+#ifndef ENABLE_ANS_EXPERIMENTAL
+#define ENABLE_ANS_EXPERIMENTAL
+#endif
+#include "../src/vp8/decoder/ans_bool_reader.hh"
+#include "../src/vp8/encoder/ans_bool_writer.hh"
+#undef ENABLE_ANS_EXPERIMENTAL
 struct Data {
     unsigned char prob;
     unsigned short trueCount;
@@ -81,7 +87,7 @@ void EofHelper(bool useLazyWrapper) {
     MemReadWriter rw(alloc);
     LazyReaderWrapper lrw(&rw);
     MuxReader reader(alloc, 4, 65536, useLazyWrapper ? (DecoderReader*)&lrw : (DecoderReader*)&rw);
-    MuxWriter writer(&rw, alloc);
+    MuxWriter writer(&rw, alloc, 2);
     writer.Write(1, &testData[1][0], a1);
     writer.Write(0, &testData[0][0], a0);
     writer.Write(1, &testData[1][a1], b1);
@@ -163,7 +169,7 @@ void RoundtripHelper(bool useLazyWrapper) {
     MemReadWriter rw(alloc);
     LazyReaderWrapper lrw(&rw);
     MuxReader reader(alloc, 4, 65536, useLazyWrapper ? (DecoderReader*)&lrw : (DecoderReader*)&rw);
-    MuxWriter writer(&rw, alloc);
+    MuxWriter writer(&rw, alloc, 2);
     srand(1023);
     
     bool allDone;
@@ -337,12 +343,118 @@ void test_thread_handoff() {
     handoff_compare(test8, roundtrip8);
 }
 
-
+void test_ans_coding() {
+    ANSBoolWriter writer;
+    Branch p50_50 = Branch::identity();
+    Branch p66_44 = Branch::identity();
+    p66_44.record_obs_and_update(true);
+    p66_44.record_obs_and_update(false);
+    p66_44.record_obs_and_update(false);
+    Branch p90_10 = Branch::identity();
+    p90_10.record_obs_and_update(false);
+    p90_10.record_obs_and_update(false);
+    p90_10.record_obs_and_update(false);
+    p90_10.record_obs_and_update(false);
+    p90_10.record_obs_and_update(false);
+    p90_10.record_obs_and_update(false);
+    p90_10.record_obs_and_update(false);
+    p90_10.record_obs_and_update(false);
+    Branch p10_90 = Branch::identity();
+    p10_90.record_obs_and_update(true);
+    p10_90.record_obs_and_update(true);
+    p10_90.record_obs_and_update(true);
+    p10_90.record_obs_and_update(true);
+    p10_90.record_obs_and_update(true);
+    p10_90.record_obs_and_update(true);
+    p10_90.record_obs_and_update(true);
+    p10_90.record_obs_and_update(true);
+    Branch p44_66 = Branch::identity();
+    p66_44.record_obs_and_update(true);
+    p66_44.record_obs_and_update(true);
+    p66_44.record_obs_and_update(false);
+    Branch p20_80 = Branch::identity();
+    p20_80.record_obs_and_update(true);
+    p20_80.record_obs_and_update(true);
+    p20_80.record_obs_and_update(true);
+    const Branch probs[16] = {
+        p50_50,
+        p66_44,
+        p90_10,
+        p10_90,
+        p44_66,
+        p20_80,
+        p66_44,
+        p66_44,
+        p66_44,
+        p66_44,
+        p66_44,
+        p66_44,
+        p10_90,
+        p10_90,
+        p10_90,
+        p10_90
+    };
+    Branch enc_probs[16];
+    Branch dec_probs[16];
+    memcpy(enc_probs, probs, sizeof(probs));
+    memcpy(dec_probs, probs, sizeof(probs));
+    bool vals[16] = {
+        true,
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        true,
+        true,
+        true,
+        true,
+    };
+    std::vector<Branch> prob_stream;
+    for (int j =0;j < 64; ++j) {
+        for (int i =0;i < 16; ++i) {
+            prob_stream.push_back(enc_probs[i]);
+            writer.put(vals[i], enc_probs[i], Billing::HEADER);
+        }
+    }
+    Sirikata::MuxReader::ResizableByteBuffer final_buffer;
+    writer.finish(final_buffer);
+    ANSBoolReader reader(final_buffer.data(), final_buffer.size());
+    size_t prob_index = 0;
+    for (int j = 0; j < 64; ++j) {
+        for (int i =0;i < 16; ++i) {
+            int prob_similarity_res = memcmp(&dec_probs[i], &prob_stream[prob_index++], sizeof(Branch));
+            if (prob_similarity_res) {
+                fprintf(stderr, "pass %d %d) [%d %d %d] != [%d %d %d]\n",
+                        j, i,
+                        dec_probs[i].false_count(),dec_probs[i].true_count(),(int)dec_probs[i].prob(),
+                        prob_stream[prob_index - 1].false_count(),prob_stream[prob_index-1].true_count(),(int)prob_stream[prob_index -1].prob());
+            }
+            always_assert(prob_similarity_res == 0);
+            bool val = reader.get(dec_probs[i], Billing::HEADER);
+            if (val != vals[i]) {
+                for (int inner =0;inner <= i; ++inner) {
+                    fprintf(stderr, "pass:%d %d) [prob=%d] val=%d (should be %d)\n",
+                            j, inner, probs[i].prob(), inner == i ? val:vals[i], vals[i]);
+                }
+            }
+            always_assert(val == vals[i]);
+        }
+    }
+    
+}
 int main() {
-    Sirikata::memmgr_init(768 * 1024 * 1024,
-                          64 * 1024 * 1024,
+    Sirikata::memmgr_init(32 * 1024 * 1024,
+                          16 * 1024 * 1024,
                           3,
                           256);
+    test_ans_coding();
     test_thread_handoff();
     for (size_t i = 0; i < karray.size(); ++i) {
         always_assert(karray[i] == i);
@@ -398,6 +510,7 @@ int main() {
                 always_assert(fast_divide16bit(num, denom) == (unsigned int)num / denom);
                 if (denom == 5) {
                     always_assert(templ_divide16bit<5>(num) == (unsigned int)num / denom);
+#ifndef USE_SCALAR
                     __m128i retval = divide16bit_vec_signed<5>(_mm_set_epi32(num,(int)-num, -num-1, -num + 1));
                     int ret[4];
                     _mm_storeu_si128((__m128i*)(char *)ret, retval);
@@ -405,7 +518,9 @@ int main() {
                     always_assert(ret[2] == -num / denom);
                     always_assert(ret[1] == (-num-1)/denom);
                     always_assert(ret[0] == (-num + 1) / denom);
+#endif
                 }
+#ifndef USE_SCALAR
                 if (denom == 767) {
                     __m128i retval = divide16bit_vec<767>(_mm_set_epi32(num,num + 1, 0, num * 2));
                     int ret[4];
@@ -414,8 +529,8 @@ int main() {
                     always_assert(ret[2] == (1 + num) / denom);
                     always_assert(ret[1] == 0);
                     always_assert(ret[0] == (num * 2) / denom);
-
                 }
+#endif
             }
         }
     }

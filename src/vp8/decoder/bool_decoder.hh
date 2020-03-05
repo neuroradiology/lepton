@@ -6,6 +6,9 @@
 #include "../../io/Reader.hh"
 #include "JpegArithmeticCoder.hh"
 #include "vpx_bool_reader.hh"
+#ifdef ENABLE_ANS_EXPERIMENTAL
+#include "ans_bool_reader.hh"
+#endif
 typedef int8_t TreeNode;
 
 class Branch;
@@ -42,7 +45,7 @@ public:
         return jpeg_coder_.arith_decode(this, &branch.probability_);
     }
 };
-
+/*
 #ifdef JPEG_ENCODER
 //easier than a typedef so that we can forward declare this class elsewhere
 class BoolDecoder : public JpegBoolDecoder {public:
@@ -52,9 +55,10 @@ class BoolDecoder : public JpegBoolDecoder {public:
 //easier than a typedef so that we can forward declare this class elsewhere
 class BoolDecoder : public VPXBoolReader { public:
     BoolDecoder(const uint8_t *data, size_t size) : VPXBoolReader(data, size){}
+    BoolDecoder(PacketReader*pr) : VPXBoolReader(pr){}
     BoolDecoder() {}
 };
 #endif
-
+*/
 
 #endif /* BOOL_DECODER_HH */

@@ -1,5 +1,5 @@
-#ifndef _BLOCK_BASED_IMAGE_HH_
-#define _BLOCK_BASED_IMAGE_HH_
+#ifndef BLOCK_BASED_IMAGE_HH_
+#define BLOCK_BASED_IMAGE_HH_
 #include "memory.hh"
 #include "aligned_block.hh"
 #include "block_context.hh"
@@ -20,11 +20,18 @@ class BlockBasedImageBase {
 public:
     BlockBasedImageBase()
       : memory_optimized_image_(force_memory_optimization) {
-        image_ = nullptr;
         storage_ = nullptr;
+        reset();
+    }
+  void reset() {
         width_ = 0;
         nblocks_ = 0;
         theoretical_component_height_ = 0;
+        image_ = nullptr;
+        if (storage_ != nullptr) {
+            custom_free(storage_);
+        }
+        storage_ = nullptr;
     }
     bool is_memory_optimized() const {
         return force_memory_optimization
@@ -210,7 +217,7 @@ public:
 #else
             offset = offset % (width_ << 1);
 #endif
-            assert(offset <= nblocks_ && "we mod offset by width_: it is < nblocks_");
+            dev_assert(offset <= nblocks_ && "we mod offset by width_: it is < nblocks_");
         } else if (offset >= nblocks_) {
             custom_exit(ExitCode::OOM);
         }
@@ -223,7 +230,7 @@ public:
 #else
             offset = offset % (width_ << 1);
 #endif
-            assert(offset <= nblocks_ && "we mod offset by width_: it is < nblocks_");
+            dev_assert(offset <= nblocks_ && "we mod offset by width_: it is < nblocks_");
         } else if (__builtin_expect(offset >= nblocks_, 0)) {
             custom_exit(ExitCode::OOM);
         }

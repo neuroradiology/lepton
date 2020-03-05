@@ -2,28 +2,37 @@
 #include <time.h>
 #include <stdio.h>
 #include <iostream>
-
+#ifdef _WIN32
+#include <stdint.h>
+#endif
 #include "uncompressed_components.hh"
 #include "recoder.hh"
 #include "bitops.hh"
 #include "lepton_codec.hh"
+#include "vp8_decoder.hh"
 #include "../io/BoundedMemWriter.hh"
 #include "../vp8/util/memory.hh"
 #define ENVLI(s,v)        ( ( v > 0 ) ? v : ( v - 1 ) + ( 1 << s ) )
 
 int next_mcuposn(int* cmp, int* dpos, int* rstw );
+extern unsigned char ujgversion;
 extern BaseDecoder *g_decoder;
 extern UncompressedComponents colldata; // baseline sorted DCT coefficients
-extern componentInfo cmpnfo[ 4 ];
-extern char padbit;
 
-extern int cs_cmp[ 4 ];
+extern int8_t padbit; // signed
+
+
+extern Sirikata::Array1d<int, 4> cs_cmp; // component numbers  in current scan
+extern Sirikata::Array1d<componentInfo, 4> cmpnfo;
+
+extern bool embedded_jpeg;
 extern int grbs;   // size of garbage
-extern int            hdrs;   // size of header
-extern unsigned short qtables[4][64];                // quantization tables
-extern huffCodes      hcodes[2][4];                // huffman codes
-extern huffTree       htrees[2][4];                // huffman decoding trees
-extern unsigned char  htset[2][4];                    // 1 if huffman table is set
+extern uint32_t            hdrs;   // size of header
+extern Sirikata::Array1d<Sirikata::Array1d<unsigned short, 64>, 4> qtables; // quantization tables
+extern Sirikata::Array1d<Sirikata::Array1d<huffCodes, 4>, 2> hcodes; // huffman codes
+extern Sirikata::Array1d<Sirikata::Array1d<huffTree, 4>, 2> htrees; // huffman decoding trees
+extern Sirikata::Array1d<Sirikata::Array1d<unsigned char, 4>, 2> htset;// 1 if huffman table is set
+
 extern unsigned char* grbgdata;    // garbage data
 extern unsigned char* hdrdata;   // header data
 extern int            rsti;
@@ -36,9 +45,11 @@ extern std::vector<unsigned int> rst_cnt;
 extern int prefix_grbs;   // size of prefix garbage
 extern unsigned char *prefix_grbgdata; // the actual prefix garbage: if present, hdrdata not serialized
 
+static void nop(){}
+
 void check_decompression_memory_bound_ok();
 
-bool parse_jfif_jpg( unsigned char type, unsigned int len, unsigned char* segment );
+bool parse_jfif_jpg( unsigned char type, unsigned int len, uint32_t alloc_len, unsigned char* segment );
 #define B_SHORT(v1,v2)    ( ( ((int) v1) << 8 ) + ((int) v2) )
 
 int find_aligned_end_64_scalar(const int16_t *block) {
@@ -48,29 +59,9 @@ int find_aligned_end_64_scalar(const int16_t *block) {
     }
     return end;
 }
-int find_aligned_end_64_sse41(const int16_t *block) {
-    unsigned int mask = 0;
-    int iter;
-    for (iter = 56; iter >= 0; iter -=8) {
-        __m128i row = _mm_load_si128((__m128i*)(block + iter));
-        __m128i row_cmp = _mm_cmpeq_epi16(row, _mm_setzero_si128());
-        mask = _mm_movemask_epi8(row_cmp);
-        if (mask != 0xffff) {
-            break;
-        }
-    }
-    if (mask == 0xffff) {
-        assert(find_aligned_end_64_scalar(block) == 0);
-        return 0;
-    }
-    unsigned int bitpos = 32 - __builtin_clz((~mask) & 0xffff);
-    int retval = iter + ((bitpos >> 1) - 1) ;
 
-    assert(retval == find_aligned_end_64_scalar(block));
-    return retval;
-}
-#ifdef __AVX2__
-int find_aligned_end_64(const int16_t *block) {
+#if defined(__AVX2__) && !defined(USE_SCALAR)
+int find_aligned_end_64_avx2(const int16_t *block) {
     uint32_t mask = 0;
     int iter;
     for (iter = 48; iter >= 0; iter -=16) {
@@ -82,32 +73,66 @@ int find_aligned_end_64(const int16_t *block) {
         }
     }
     if (mask == 0xffffffffU) {
-        assert(find_aligned_end_64_scalar(block) == 0);
+        dev_assert(find_aligned_end_64_scalar(block) == 0);
         return 0;
     }
     unsigned int bitpos = 32 - __builtin_clz((~mask) & 0xffffffffU);
     int retval = iter + ((bitpos >> 1) - 1) ;
 
-    assert(retval == find_aligned_end_64_scalar(block));
+    dev_assert(retval == find_aligned_end_64_scalar(block));
     return retval;
 }
-#else
-int find_aligned_end_64(const int16_t *block) {
-    return find_aligned_end_64_sse41(block);
+#elif !defined(USE_SCALAR)
+/**
+ * SSE4.2 Based implementation for machines that don't support AVX2
+ */
+int find_aligned_end_64_sse42(const int16_t *block) {
+    unsigned int mask = 0;
+    int iter;
+    for (iter = 56; iter >= 0; iter -=8) {
+        __m128i row = _mm_load_si128((__m128i*)(block + iter));
+        __m128i row_cmp = _mm_cmpeq_epi16(row, _mm_setzero_si128());
+        mask = _mm_movemask_epi8(row_cmp);
+        if (mask != 0xffff) {
+            break;
+        }
+    }
+    if (mask == 0xffff) {
+        dev_assert(find_aligned_end_64_scalar(block) == 0);
+        return 0;
+    }
+    unsigned int bitpos = 32 - __builtin_clz((~mask) & 0xffff);
+    int retval = iter + ((bitpos >> 1) - 1) ;
+
+    dev_assert(retval == find_aligned_end_64_scalar(block));
+    return retval;
 }
 #endif
 
+int find_aligned_end_64(const int16_t *block) {
+#if defined(USE_SCALAR)
+    return find_aligned_end_64_scalar(block);
+#elif defined(__AVX2__)
+    return find_aligned_end_64_avx2(block);
+#elif defined(__SSE_4_2)
+    return find_aligned_end_64_sse42(block);
+#else
+    return find_aligned_end_64_scalar(block);
+#endif
+}
+
 static bool aligned_memchr16ff(const unsigned char *local_huff_data) {
-#if 1
+#ifdef USE_SCALAR
+    return memchr(local_huff_data, 0xff, 16) != NULL;
+#else
     __m128i buf = _mm_load_si128((__m128i const*)local_huff_data);
     __m128i ff = _mm_set1_epi8(-1);
     __m128i res = _mm_cmpeq_epi8(buf, ff);
     uint32_t movmask = _mm_movemask_epi8(res);
     bool retval = movmask != 0x0;
-    assert (retval == (memchr(local_huff_data, 0xff, 16) != NULL));
+    dev_assert (retval == (memchr(local_huff_data, 0xff, 16) != NULL));
     return retval;
 #endif
-    return memchr(local_huff_data, 0xff, 16) != NULL;
 }
 
 
@@ -124,19 +149,6 @@ void escape_0xff_huffman_and_write(OutputWriter* str_out,
     {
         // write & expand huffman coded image data
         const unsigned char stv = 0x00; // 0xFF stuff value
-        for ( ; progress_ipos & 0xf; progress_ipos++ ) {
-            if (__builtin_expect(!(progress_ipos < max_byte_coded), 0)) {
-                break;
-            }
-            uint8_t byte_to_write = local_huff_data[progress_ipos];
-            str_out->write_byte(byte_to_write);
-            // check current byte, stuff if needed
-            if (__builtin_expect(byte_to_write == 0xFF, 0)) {
-                str_out->write_byte(stv);
-                write_byte_bill(Billing::DELIMITERS, false, 1);
-            }
-        }
-
         while(true) {
             if (__builtin_expect(!(progress_ipos + 15 < max_byte_coded), 0)) {
                 break;
@@ -405,7 +417,7 @@ unsigned int handle_initial_segments( bounded_iostream * const str_out )
 
     while ( true ) {
         /* step 1: have we exhausted the headers without reaching the scan? */
-        if ( static_cast<int>( byte_position + 3 ) >= hdrs ) {
+        if ( static_cast<uint32_t>( byte_position + 3 ) >= hdrs ) {
             std::cerr << "overran headers\n";
             return -1;
         }
@@ -424,7 +436,7 @@ unsigned int handle_initial_segments( bounded_iostream * const str_out )
         /* step 4: if it's a DHT (0xC4), DRI (0xDD), or SOS (0xDA), parse to mutable globals */
         if ( type == 0xC4 || type == 0xDD || type == 0xDA ) {
             /* XXX make sure parse_jfif_jpg can't overrun hdrdata */
-            if ( !parse_jfif_jpg( type, len, hdrdata + byte_position ) ) { return -1; }
+            if ( !parse_jfif_jpg( type, len, hdrs - byte_position > len ? len : hdrs - byte_position, hdrdata + byte_position ) ) { return -1; }
         }
 
         /* step 5: we parsed the header -- accumulate byte position */
@@ -436,12 +448,11 @@ unsigned int handle_initial_segments( bounded_iostream * const str_out )
         if ( type == 0xDA ) {
             if (prefix_grbgdata) {
                 str_out->write(prefix_grbgdata, prefix_grbs);
-            } else {
-                {
-                    unsigned char SOI[ 2 ] = { 0xFF, 0xD8 }; // SOI segment
-                    // write SOI
-                    str_out->write( SOI, 2 );
-                }
+            }
+            if (embedded_jpeg || !prefix_grbgdata) {
+                unsigned char SOI[ 2 ] = { 0xFF, 0xD8 }; // SOI segment
+                // write SOI
+                str_out->write( SOI, 2 );
                 str_out->write( hdrdata, byte_position );
             }
             return byte_position; /* ready for the scan */
@@ -474,7 +485,7 @@ ThreadHandoff recode_row_range(BoundedWriter *stream_out,
                                                 retval.num_overhang_bits);
     int decode_index = 0;
     while (true) {
-        LeptonCodec::RowSpec cur_row = LeptonCodec::row_spec_from_index(decode_index++,
+        LeptonCodec_RowSpec cur_row = LeptonCodec_row_spec_from_index(decode_index++,
                                                                         framebuffer,
                                                                         mcuv,
                                                                         max_coded_heights);
@@ -562,6 +573,9 @@ void recode_physical_thread(BoundedWriter *stream_out,
     int logical_thread_start, logical_thread_end;
     std::tie(logical_thread_start, logical_thread_end)
         = logical_thread_range_from_physical_thread_id(physical_thread_id, num_logical_threads);
+    //fprintf(stderr, "Worker %d running %d - %d - %d\n", physical_thread_id, logical_thread_start, (int)thread_handoffs.size(), logical_thread_end);
+    always_assert((size_t)logical_thread_start < thread_handoffs.size()
+                  && (size_t)logical_thread_end <= thread_handoffs.size());
     ThreadHandoff th = thread_handoffs[logical_thread_start];
     size_t original_bound = stream_out->get_bound();
     bool changed_bounds = false;
@@ -577,9 +591,9 @@ void recode_physical_thread(BoundedWriter *stream_out,
             memcpy(tmp.last_dc.begin(), th.last_dc.begin(), sizeof(th.last_dc));
             th = tmp; // copy the dynamic data in
         } else {
-            assert(memcmp(thread_handoffs[logical_thread_id].last_dc.begin(), th.last_dc.begin(), sizeof(th.last_dc)) == 0);
-            assert(th.overhang_byte == thread_handoffs[logical_thread_id].overhang_byte);
-            assert(th.num_overhang_bits == thread_handoffs[logical_thread_id].num_overhang_bits);
+            dev_assert(memcmp(thread_handoffs[logical_thread_id].last_dc.begin(), th.last_dc.begin(), sizeof(th.last_dc)) == 0);
+            dev_assert(th.overhang_byte == thread_handoffs[logical_thread_id].overhang_byte);
+            dev_assert(th.num_overhang_bits == thread_handoffs[logical_thread_id].num_overhang_bits);
             th = thread_handoffs[logical_thread_id];
             // in the v1 encoding, the first thread's output is unbounded in size but
             // following threads are bound to their segment_size.
@@ -601,6 +615,7 @@ void recode_physical_thread(BoundedWriter *stream_out,
         }
         //if (logical_thread_id != physical_thread_id) {
         g_decoder->clear_thread_state(logical_thread_id, physical_thread_id, framebuffer);
+
         //}
         ThreadHandoff outth = recode_row_range(stream_out,
                                                framebuffer,
@@ -613,10 +628,17 @@ void recode_physical_thread(BoundedWriter *stream_out,
                                                huffw);        
         if (logical_thread_id + 1 < num_logical_threads
             && !thread_handoffs[logical_thread_id + 1].is_legacy_mode()) {
+            if (thread_handoffs[logical_thread_id+1].luma_y_start !=
+                thread_handoffs[logical_thread_id+1].luma_y_end || ujgversion ==1 ) {
             // make sure we computed the same item that was stored
-            always_assert(outth.num_overhang_bits ==  thread_handoffs[logical_thread_id + 1].num_overhang_bits);
-            always_assert(outth.overhang_byte ==  thread_handoffs[logical_thread_id + 1].overhang_byte);
-            always_assert(memcmp(outth.last_dc.begin(), thread_handoffs[logical_thread_id + 1].last_dc.begin(), sizeof(outth.last_dc)) == 0);
+                if (g_threaded) {
+                    always_assert(outth.num_overhang_bits ==  thread_handoffs[logical_thread_id + 1].num_overhang_bits);
+                    always_assert(outth.overhang_byte ==  thread_handoffs[logical_thread_id + 1].overhang_byte);
+                }
+                if (g_threaded || thread_handoffs[logical_thread_id + 1].segment_size > 1) {
+                    always_assert(memcmp(outth.last_dc.begin(), thread_handoffs[logical_thread_id + 1].last_dc.begin(), sizeof(outth.last_dc)) == 0);
+                }
+            }
             if (physical_thread_id > 0 && stream_out->bytes_written()) { // if 0 are written the bound is not tight
                 always_assert(stream_out->get_bound() == stream_out->bytes_written());
             }
@@ -647,13 +669,33 @@ void recode_physical_thread_wrapper(Sirikata::BoundedMemWriter *stream_out,
                            physical_thread_id,
                            huffw);
 }
+void recode_physical_first_thread_wrapper(bounded_iostream*stream_out,
+                            BlockBasedImagePerChannel<true> &framebuffer,
+                            int mcuv,
+                            const std::vector<ThreadHandoff> &thread_handoffs,
+                            Sirikata::Array1d<uint32_t,
+                                              (uint32_t)ColorChannel::NumBlockTypes> max_coded_heights,
+                            Sirikata::Array1d<uint32_t,
+                                              (uint32_t)ColorChannel::NumBlockTypes> component_size_in_blocks,
+                            int physical_thread_id,
+                            abitwriter * huffw) {
+    recode_physical_thread(stream_out,
+                           framebuffer,
+                           mcuv,
+                           thread_handoffs,
+                           max_coded_heights,
+                           component_size_in_blocks,
+                           physical_thread_id,
+                           huffw);
+}
 /* -----------------------------------------------
     JPEG encoding routine
     ----------------------------------------------- */
 bool recode_baseline_jpeg(bounded_iostream*str_out,
                           int max_file_size)
-{    
-
+{
+    always_assert(max_file_size > grbs && "Lepton only supports files that have some scan data");
+    // if the entire file is garbage, lepton will not support the file
     unsigned int local_bound = max_file_size - grbs;
     str_out->set_bound(local_bound);
 
@@ -689,6 +731,15 @@ bool recode_baseline_jpeg(bounded_iostream*str_out,
     if (luma_bounds.size() && luma_bounds[0].is_legacy_mode()) {
         g_threaded = false;
     }
+    g_decoder->reset_all_comm_buffers();
+    for (unsigned int physical_thread_id = 1; physical_thread_id < (g_threaded ? NUM_THREADS : 1); ++physical_thread_id) {
+        int logical_thread_start, logical_thread_end;
+        std::tie(logical_thread_start, logical_thread_end)
+            = logical_thread_range_from_physical_thread_id(physical_thread_id, luma_bounds.size());
+        for (int log_thread = logical_thread_start; log_thread < logical_thread_end; ++log_thread) {
+            g_decoder->map_logical_thread_to_physical_thread(log_thread, physical_thread_id);
+        }
+    }
     /* step 3: decode the scan, row by row */
     std::tuple<uint8_t, uint8_t, Sirikata::Array1d<int16_t, (size_t)ColorChannel::NumBlockTypes> > overhang_byte_and_bit_count;
     std::get<0>(overhang_byte_and_bit_count) = 0;
@@ -702,9 +753,22 @@ bool recode_baseline_jpeg(bounded_iostream*str_out,
         huffws[i] = new abitwriter(65536, max_file_size);
     }
 
-    if (g_threaded) {
-        for (unsigned int physical_thread_id = 1; physical_thread_id < (g_threaded ? NUM_THREADS : 1); ++physical_thread_id) {
+    for (unsigned int physical_thread_id = 0; physical_thread_id < (g_threaded ? NUM_THREADS : 1); ++physical_thread_id) {
+        int logical_thread_start, logical_thread_end;
+        std::tie(logical_thread_start, logical_thread_end)
+            = logical_thread_range_from_physical_thread_id(physical_thread_id, luma_bounds.size());
+        for (int logical_thread_id = logical_thread_start; logical_thread_id < logical_thread_end; ++logical_thread_id) {
+            g_decoder->map_logical_thread_to_physical_thread(logical_thread_id, physical_thread_id);
+        }
+
+    }
+    if (NUM_THREADS != 1 && g_threaded) {
+        for (unsigned int physical_thread_id = 0; physical_thread_id < (g_threaded ? g_decoder->getNumWorkers() : 1); ++physical_thread_id) {
+            g_decoder->getWorker(physical_thread_id)->work = nop;
+        }
+        for (unsigned int physical_thread_id = 0; physical_thread_id < (g_threaded ? NUM_THREADS : 1); ++physical_thread_id) {
             int work_size = 0;
+            unsigned int physical_thread_offset = physical_thread_id;
             int logical_thread_start, logical_thread_end;
             std::tie(logical_thread_start, logical_thread_end)
                 = logical_thread_range_from_physical_thread_id(physical_thread_id, luma_bounds.size());
@@ -715,48 +779,63 @@ bool recode_baseline_jpeg(bounded_iostream*str_out,
             if (!work_size) {
                 work_size = max_file_size;
             }
-            local_buffers[physical_thread_id - 1].set_bound(work_size);
-            auto work_fn = std::bind(&recode_physical_thread_wrapper,
-                                  &local_buffers[physical_thread_id - 1],
-                                  framebuffer[physical_thread_id],
-                                  mcu_count_vertical,
-                                  luma_bounds,
-                                  max_coded_heights,
-                                  component_size_in_blocks,
-                                  physical_thread_id,
-                                  huffws[physical_thread_id]);
-            g_decoder->getWorker(physical_thread_id - 1)->work
-                = work_fn;
-            g_decoder->getWorker(physical_thread_id - 1)->activate_work();
-                    
+            if (physical_thread_id != 0) {
+                local_buffers[physical_thread_offset - 1].set_bound(work_size);
+                auto work_fn = std::bind(&recode_physical_thread_wrapper,
+                                         &local_buffers[physical_thread_id - 1],
+                                         framebuffer[physical_thread_id],
+                                         mcu_count_vertical,
+                                         luma_bounds,
+                                         max_coded_heights,
+                                         component_size_in_blocks,
+                                         physical_thread_id,
+                                         huffws[physical_thread_id]);
+                g_decoder->getWorker(physical_thread_offset)->work = work_fn;
+            } else {
+                auto work_fn = std::bind(&recode_physical_first_thread_wrapper,
+                                         str_out,
+                                         framebuffer[physical_thread_id],
+                                         mcu_count_vertical,
+                                         luma_bounds,
+                                         max_coded_heights,
+                                         component_size_in_blocks,
+                                         physical_thread_id,
+                                         huffws[physical_thread_id]);
+                g_decoder->getWorker(physical_thread_offset)->work = work_fn;
+            }
+            g_decoder->getWorker(physical_thread_offset)->activate_work();
         }
-    }
-    recode_physical_thread(str_out,
-                           framebuffer[0],
-                           mcu_count_vertical,
-                           luma_bounds,
-                           max_coded_heights,
-                           component_size_in_blocks,
-                           0,
-                           huffws[0]);
-    TimingHarness::timing[0][TimingHarness::TS_JPEG_RECODE_STARTED] = TimingHarness::get_time_us();
-    for (unsigned int physical_thread_id = 1;physical_thread_id < (g_threaded ? NUM_THREADS : 1); ++physical_thread_id) {
-        TimingHarness::timing[physical_thread_id][TimingHarness::TS_THREAD_WAIT_STARTED] = TimingHarness::get_time_us();
-
-        g_decoder->getWorker(physical_thread_id - 1)->main_wait_for_done();
-        TimingHarness::timing[physical_thread_id][TimingHarness::TS_THREAD_WAIT_FINISHED] =
-            TimingHarness::timing[physical_thread_id][TimingHarness::TS_JPEG_RECODE_STARTED] = TimingHarness::get_time_us();
-        size_t bytes_to_copy = local_buffers[physical_thread_id - 1].bytes_written();
-        if (bytes_to_copy) {
-            local_bound -= bytes_to_copy;
-            str_out->write(&local_buffers[physical_thread_id - 1].buffer()[0],
-                           bytes_to_copy);
+        g_decoder->flush();
+        for (unsigned int physical_thread_id = 0; physical_thread_id < (g_threaded ? NUM_THREADS : 1); ++physical_thread_id) {
+            unsigned int physical_thread_offset = physical_thread_id;
+            TimingHarness::timing[physical_thread_id][TimingHarness::TS_THREAD_WAIT_STARTED] = TimingHarness::get_time_us();
+            
+            g_decoder->getWorker(physical_thread_offset)->main_wait_for_done();
+            TimingHarness::timing[physical_thread_id][TimingHarness::TS_THREAD_WAIT_FINISHED] =
+                TimingHarness::timing[physical_thread_id][TimingHarness::TS_JPEG_RECODE_STARTED] = TimingHarness::get_time_us();
+            if (physical_thread_id > 0) { // the first guy goes right to stdout
+                size_t bytes_to_copy = local_buffers[physical_thread_id - 1].bytes_written();
+                if (bytes_to_copy) {
+                    local_bound -= bytes_to_copy;
+                    str_out->write(&local_buffers[physical_thread_id - 1].buffer()[0],
+                                   bytes_to_copy);
+                }
+            }
+            TimingHarness::timing[physical_thread_id][TimingHarness::TS_JPEG_RECODE_FINISHED] = TimingHarness::get_time_us();
         }
-        TimingHarness::timing[physical_thread_id][TimingHarness::TS_JPEG_RECODE_FINISHED] = TimingHarness::get_time_us();
-
+    } else {
+        TimingHarness::timing[0][TimingHarness::TS_JPEG_RECODE_STARTED] = TimingHarness::get_time_us();
+        recode_physical_thread(str_out,
+                               framebuffer[0],
+                               mcu_count_vertical,
+                               luma_bounds,
+                               max_coded_heights,
+                               component_size_in_blocks,
+                               0,
+                               huffws[0]);
     }
+
     if (!rst_err.empty()) {
-
         unsigned int cumulative_reset_markers = rsti ? (mcuh * mcuv - 1)/ rsti : 0;
         for (unsigned char i = 0; i < rst_err[0]; ++i) {
             const unsigned char mrk = 0xFF;
@@ -771,7 +850,22 @@ bool recode_baseline_jpeg(bounded_iostream*str_out,
     if (!str_out->has_reached_bound() ) {
         str_out->write( hdrdata + byte_position, hdrs - byte_position );
     }
-
+    if (ujgversion != 1) {
+        for (size_t i = 0; i < NUM_THREADS; ++i) {
+            delete huffws[i];
+        }
+        huffws.memset(0);
+        for (size_t thread_id = 0; thread_id < NUM_THREADS; ++thread_id) {
+            for(int cmp = 0; cmp < colldata.get_num_components(); ++cmp) {
+                framebuffer[thread_id][cmp]->reset();
+                delete framebuffer[thread_id][cmp];
+                framebuffer[thread_id][cmp] = NULL;
+            }
+            if (!g_threaded) {
+                break;
+            }
+        }
+    }
     check_decompression_memory_bound_ok();
 
     // write EOI (now EOI is stored in garbage of at least 2 bytes)

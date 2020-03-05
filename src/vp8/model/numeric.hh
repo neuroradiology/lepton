@@ -1,5 +1,5 @@
-#ifndef _VP8_MODEL_NUMERIC_HH_
-#define _VP8_MODEL_NUMERIC_HH_
+#ifndef VP8_MODEL_NUMERIC_HH_
+#define VP8_MODEL_NUMERIC_HH_
 //#define DEBUGDECODE
 //for uint16_t
 #include <cstdint>
@@ -8,8 +8,21 @@
 // for std::min
 #include <algorithm>
 #include <assert.h>
-#include <smmintrin.h>
-#include <emmintrin.h>
+#include "../util/memory.hh"
+#ifndef USE_SCALAR
+#include <immintrin.h>
+#include <tmmintrin.h>
+#include "../util/mm_mullo_epi32.hh"
+#endif
+
+#ifdef __GNUC__
+#if __GNUC__ == 7
+#if __GNUC_MINOR__ == 1
+// workaround https://gcc.gnu.org/bugzilla/show_bug.cgi?id=81015
+#define WORKAROUND_CLZ_BUG
+#endif
+#endif
+#endif
 
 #ifdef _WIN32
 #include <intrin.h>
@@ -79,15 +92,30 @@ inline constexpr uint8_t k16bit_length(uint16_t v) {
     ? 8 + LenTable256[v >> 8]
     : LenTable256[v];
 }
+
+
 inline uint8_t uint16log2(uint16_t v) {
+#ifdef WORKAROUND_CLZ_BUG
+    return k16log2(v);
+#else
     return 31 - __builtin_clz((uint32_t)v);
+#endif
 }
 inline uint8_t nonzero_bit_length(uint16_t v) {
-    assert(v);
+    dev_assert(v);
+#ifdef WORKAROUND_CLZ_BUG
+    return k16bit_length(v);
+#else
     return 32 - __builtin_clz((uint32_t)v);
+#endif
+    
 }
 inline uint8_t uint16bit_length(uint16_t v) {
+#ifdef WORKAROUND_CLZ_BUG
+    return k16bit_length(v);
+#else
     return v ? 32 - __builtin_clz((uint32_t)v) : 0;
+#endif
 }
 #endif
 
@@ -288,6 +316,7 @@ template <uint16_t denom> constexpr uint32_t templ_divide16bit(uint32_t num) {
     >> DivisorAndLog2Table[denom].len;
 }
 
+#ifndef USE_SCALAR
 template <uint16_t denom> __m128i divide16bit_vec_signed(__m128i num) {
     static_assert(denom < 1024, "Only works for denominators < 1024");
     __m128i m = _mm_set1_epi32(DivisorAndLog2Table[denom].divisor);
@@ -306,7 +335,7 @@ template <uint16_t denom> __m128i divide16bit_vec(__m128i num) {
     __m128i t_plus_shr = _mm_add_epi32(t, _mm_srli_epi32(n_minus_t, 1));
     return _mm_srli_epi32(t_plus_shr, DivisorAndLog2Table[denom].len);
 }
-
+#endif
 
 inline uint32_t slow_divide18bit_by_10bit(uint32_t num, uint16_t denom) {
 #if 0
@@ -358,11 +387,13 @@ template<typename intt> intt local_log2(intt v) {
 
 
 template <typename intt> intt bit_length(intt v) {
+#ifndef WORKAROUND_CLZ_BUG
     if (sizeof(intt) <= 4) {
         return v ? 32 - __builtin_clz((uint32_t)v) : 0;
     } else {
         return v ? 64 - __builtin_clzl((uint64_t)v) : 0;
     }
+#endif
     return v == 0 ? 0 : local_log2(v) + 1;
 }
 

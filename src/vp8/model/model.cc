@@ -8,7 +8,10 @@
 #include <fstream>
 #include <iostream>
 
+#ifndef USE_SCALAR
 #include <emmintrin.h>
+#endif
+
 #include "model.hh"
 bool all_branches_identity(const Branch * start, const Branch * end) {
     for (const Branch * i = start;i != end; ++i) {
@@ -25,7 +28,7 @@ void set_branch_range_identity(Branch * start, Branch * end) {
         }
         return;
     }
-#if __AVX__
+#if defined(__AVX__) && !defined(USE_SCALAR)
     for (int i = 0;i < 32; ++i) {
         start[i].set_identity();
     }
@@ -59,7 +62,7 @@ void set_branch_range_identity(Branch * start, Branch * end) {
         write_cursor += 3;
     }
 
-#else
+#elif defined(__SSE2__) && !defined(USE_SCALAR)
     for (int i = 0;i < 16; ++i) {
         start[i].set_identity();
     }
@@ -92,8 +95,12 @@ void set_branch_range_identity(Branch * start, Branch * end) {
         _mm_store_si128(write_cursor + 2, r2);
         write_cursor += 3;
     }
+#else
+    for (;start != end; ++start) {
+        start->set_identity();
+    }
 #endif
-    assert(all_branches_identity(start, end));
+    dev_assert(all_branches_identity(start, end));
 }
 
 #ifdef _WIN32
@@ -397,6 +404,7 @@ void load_model(Model&model, const char * filename) {
     FILE * fp = fopen(filename, "rb");
     if (fp) {
         const size_t expected_size = fread(&model, 1, sizeof(model), fp);
+        fclose(fp);
         (void)expected_size;
         always_assert(sizeof(model) == expected_size && "unexpected model file size.");
     } else {

@@ -20,7 +20,8 @@
 #include "../vp8/model/model.hh"
 #include "../vp8/encoder/encoder.hh"
 #include "../io/MuxReader.hh"
-
+#include "lepton_codec.hh"
+extern unsigned char ujgversion;
 using namespace std;
 typedef Sirikata::MuxReader::ResizableByteBuffer ResizableByteBuffer;
 void printContext(FILE * fp) {
@@ -66,20 +67,22 @@ void printContext(FILE * fp) {
 #endif
 }
 
-VP8ComponentEncoder::VP8ComponentEncoder(bool do_threading)
-    : LeptonCodec(do_threading){
+template <class ArithmeticCoder>
+VP8ComponentEncoder<ArithmeticCoder>::VP8ComponentEncoder(bool do_threading, bool use_ans_encoder)
+    : LeptonCodec<ArithmeticCoder>(do_threading){
+    this->mUseAnsEncoder = use_ans_encoder;
 }
-
-CodingReturnValue VP8ComponentEncoder::encode_chunk(const UncompressedComponents *input,
-                                                    IOUtil::FileWriter *output,
-                                                    const ThreadHandoff *selected_splits,
-                                                    unsigned int num_selected_splits)
+template <class ArithmeticCoder>
+CodingReturnValue VP8ComponentEncoder<ArithmeticCoder>::encode_chunk(const UncompressedComponents *input,
+                                                                     IOUtil::FileWriter *output,
+                                                                     const ThreadHandoff *selected_splits,
+                                                                     unsigned int num_selected_splits)
 {
-    return vp8_full_encoder(input, output, selected_splits, num_selected_splits);
+    return vp8_full_encoder(input, output, selected_splits, num_selected_splits, this->mUseAnsEncoder);
 }
-
-template<class Left, class Middle, class Right>
-void VP8ComponentEncoder::process_row(ProbabilityTablesBase &pt,
+template <class ArithmeticCoder>
+template<class Left, class Middle, class Right, class BoolEncoder>
+void VP8ComponentEncoder<ArithmeticCoder>::process_row(ProbabilityTablesBase &pt,
                                       Left & left_model,
                                       Middle& middle_model,
                                       Right& right_model,
@@ -149,30 +152,40 @@ void VP8ComponentEncoder::process_row(ProbabilityTablesBase &pt,
         context.at((int)middle_model.COLOR) = state;
     }
 }
-uint32_t aligned_block_cost(const AlignedBlock &block) {
-    uint32_t cost = 16; // .25 cost for zeros
-    if (VECTORIZE) {
-        for (int i = 0; i < 64; i+= 8) {
-            __m128i val = _mm_abs_epi16(_mm_load_si128((const __m128i*)(const char*)(block.raw_data() + i)));
-            __m128i v_cost = _mm_set1_epi16(0);
-            while (!_mm_test_all_zeros(val, val)) {
-                __m128i mask = _mm_cmpgt_epi16(val, _mm_setzero_si128());
-                v_cost = _mm_add_epi16(v_cost, _mm_and_si128(mask, _mm_set1_epi16(2)));
-                val = _mm_srli_epi16(val, 1);
-            }
-            __m128i sum = _mm_add_epi16(v_cost, _mm_srli_si128(v_cost, 8));
-            sum = _mm_add_epi16(sum ,_mm_srli_si128(sum, 4));
-            sum = _mm_add_epi16(sum, _mm_srli_si128(sum, 2));
-            cost += _mm_extract_epi16(sum, 0);
-        }
-    } else {
-        uint32_t scost = 0;
-        for (int i = 0; i < 64; ++i) {
-            scost += 1 + 2 * uint16bit_length(abs(block.raw_data()[i]));
-        }
-        cost = scost;
+
+uint32_t aligned_block_cost_scalar(const AlignedBlock &block) {
+    uint32_t scost = 0;
+    for (int i = 0; i < 64; ++i) {
+        scost += 1 + 2 * uint16bit_length(abs(block.raw_data()[i]));
     }
-    return cost;
+    return scost;
+}
+
+uint32_t aligned_block_cost(const AlignedBlock &block) {
+#if defined(__SSE2__) && !defined(USE_SCALAR) /* SSE2 or higher instruction set available { */
+    const __m128i zero = _mm_setzero_si128();
+     __m128i v_cost;
+    for (int i = 0; i < 64; i+= 8) {
+        __m128i val = _mm_abs_epi16(_mm_load_si128((const __m128i*)(const char*)(block.raw_data() + i)));
+        v_cost = _mm_set1_epi16(0);
+#ifndef __SSE4_1__
+        while (_mm_movemask_epi8(_mm_cmpeq_epi32(val, zero)) != 0xFFFF)
+#else
+        while (!_mm_test_all_zeros(val, val))
+#endif
+        {
+            __m128i mask = _mm_cmpgt_epi16(val, zero);
+            v_cost = _mm_add_epi16(v_cost, _mm_and_si128(mask, _mm_set1_epi16(2)));
+            val = _mm_srli_epi16(val, 1);
+        }
+        v_cost = _mm_add_epi16(v_cost, _mm_srli_si128(v_cost, 8));
+        v_cost = _mm_add_epi16(v_cost ,_mm_srli_si128(v_cost, 4));
+        v_cost = _mm_add_epi16(v_cost, _mm_srli_si128(v_cost, 2));
+    }
+    return 16 + _mm_extract_epi16(v_cost, 0);
+#else /* } No SSE2 instructions { */
+    return aligned_block_cost_scalar(block);
+#endif /* } */
 }
 
 #ifdef ALLOW_FOUR_COLORS
@@ -181,7 +194,7 @@ uint32_t aligned_block_cost(const AlignedBlock &block) {
     ProbabilityTables<left && above && right, TEMPLATE_ARG_COLOR1>, \
     ProbabilityTables<left && above && right, TEMPLATE_ARG_COLOR2>, \
     ProbabilityTables<left && above && right, TEMPLATE_ARG_COLOR3>
-#define EACH_BLOCK_TYPE ProbabilityTables<left&&above&&right, TEMPLATE_ARG_COLOR0>(BlockType::Y, \
+#define EACH_BLOCK_TYPE(left, above, right) ProbabilityTables<left&&above&&right, TEMPLATE_ARG_COLOR0>(BlockType::Y, \
                                                                                    left, \
                                                                                    above, \
                                                                                    right), \
@@ -223,7 +236,8 @@ tuple<ProbabilityTablesTuple(true, true, true)> middle(EACH_BLOCK_TYPE(true, tru
 tuple<ProbabilityTablesTuple(true, true, false)> midright(EACH_BLOCK_TYPE(true, true, false));
 tuple<ProbabilityTablesTuple(false, true, false)> width_one(EACH_BLOCK_TYPE(false, true, false));
 
-void VP8ComponentEncoder::process_row_range(unsigned int thread_id,
+template <class ArithmeticCoder> template <class BoolEncoder>
+void VP8ComponentEncoder<ArithmeticCoder>::process_row_range(unsigned int thread_id,
                                             const UncompressedComponents * const colldata,
                                             int min_y,
                                             int max_y,
@@ -242,12 +256,12 @@ void VP8ComponentEncoder::process_row_range(unsigned int thread_id,
     uint8_t is_top_row[(uint32_t)ColorChannel::NumBlockTypes];
     memset(is_top_row, true, sizeof(is_top_row));
     ProbabilityTablesBase *model = nullptr;
-    if (do_threading_) {
-        reset_thread_model_state(thread_id);
-        model = &thread_state_[thread_id]->model_;
+    if (this->do_threading_) {
+        LeptonCodec<ArithmeticCoder>::reset_thread_model_state(thread_id);
+        model = &this->thread_state_[thread_id]->model_;
     } else {
-        reset_thread_model_state(0);
-        model = &thread_state_[0]->model_;
+        LeptonCodec<ArithmeticCoder>::reset_thread_model_state(0);
+        model = &this->thread_state_[0]->model_;
     }
     KBlockBasedImagePerChannel<false> image_data;
     for (int i = 0; i < colldata->get_num_components(); ++i) {
@@ -256,7 +270,7 @@ void VP8ComponentEncoder::process_row_range(unsigned int thread_id,
     uint32_t encode_index = 0;
     Array1d<uint32_t, (uint32_t)ColorChannel::NumBlockTypes> max_coded_heights = colldata->get_max_coded_heights();
     while(true) {
-        RowSpec cur_row = row_spec_from_index(encode_index++,
+        LeptonCodec_RowSpec cur_row = LeptonCodec_row_spec_from_index(encode_index++,
                                               image_data,
                                               colldata->get_mcu_count_vertical(),
                                               max_coded_heights);
@@ -416,7 +430,7 @@ void VP8ComponentEncoder::process_row_range(unsigned int thread_id,
             }
         }
     }
-    RowSpec test = row_spec_from_index(encode_index,
+    LeptonCodec_RowSpec test = ::LeptonCodec_row_spec_from_index(encode_index,
                                        image_data,
                                        colldata->get_mcu_count_vertical(),
                                        max_coded_heights);
@@ -443,11 +457,73 @@ int load_model_file_fd_output() {
 }
 int model_file_fd = load_model_file_fd_output();
 
+template <class BoolDecoder>
+template<class BoolEncoder> void VP8ComponentEncoder<BoolDecoder>::threaded_encode_inner(const UncompressedComponents * const colldata,
+                                                                               IOUtil::FileWriter *str_out,
+                                                                               const ThreadHandoff * selected_splits,
+                                                                               unsigned int num_selected_splits,
+                                                                               BoolEncoder bool_encoder[MAX_NUM_THREADS],
+                                                                               ResizableByteBuffer stream[Sirikata::MuxReader::MAX_STREAM_ID]) {
+    using namespace Sirikata;
+    Array1d<std::vector<NeighborSummary>,
+            (uint32_t)ColorChannel::NumBlockTypes> num_nonzeros[MAX_NUM_THREADS];
+    for (unsigned int thread_id = 0; thread_id < NUM_THREADS; ++thread_id) {
+        bool_encoder[thread_id].init();
+        for (size_t i = 0; i < num_nonzeros[thread_id].size(); ++i) {
+            num_nonzeros[thread_id].at(i).resize(colldata->block_width(i) << 1);
+        }
+    }
+    
+    if (this->do_threading()) {
+        for (unsigned int thread_id = 1; thread_id < NUM_THREADS; ++thread_id) {
+            this->spin_workers_[thread_id - 1].work
+                = std::bind(&VP8ComponentEncoder<BoolDecoder>::process_row_range<BoolEncoder>, this,
+                            thread_id,
+                            colldata,
+                            selected_splits[thread_id].luma_y_start,
+                            selected_splits[thread_id].luma_y_end,
+                            &stream[thread_id],
+                            &bool_encoder[thread_id],
+                            &num_nonzeros[thread_id]);
+            this->spin_workers_[thread_id - 1].activate_work();
+        }
+    }
+    process_row_range(0,
+                          colldata,
+                      selected_splits[0].luma_y_start,
+                      selected_splits[0].luma_y_end,
+                      &stream[0],
+                      &bool_encoder[0],
+                      &num_nonzeros[0]);
+    if(!this->do_threading()) { // single threading
+        for (unsigned int thread_id = 1; thread_id < NUM_THREADS; ++thread_id) {
+            process_row_range(thread_id,
+                              colldata,
+                              selected_splits[thread_id].luma_y_start,
+                              selected_splits[thread_id].luma_y_end,
+                              &stream[thread_id],
+                                  &bool_encoder[thread_id],
+                              &num_nonzeros[thread_id]);
+        }
+    }
+    static_assert(MAX_NUM_THREADS * SIMD_WIDTH <= MuxReader::MAX_STREAM_ID,
+                  "Need to have enough mux streams for all threads and simd width");
+    
+    if (this->do_threading()) {
+        for (unsigned int thread_id = 1; thread_id < NUM_THREADS; ++thread_id) {
+            TimingHarness::timing[thread_id][TimingHarness::TS_THREAD_WAIT_STARTED] = TimingHarness::get_time_us();
+            this->spin_workers_[thread_id - 1].main_wait_for_done();
+            TimingHarness::timing[thread_id][TimingHarness::TS_THREAD_WAIT_FINISHED] = TimingHarness::get_time_us();
+        }
+    }
+}
 
-CodingReturnValue VP8ComponentEncoder::vp8_full_encoder( const UncompressedComponents * const colldata,
-                                                         IOUtil::FileWriter *str_out,
-                                                         const ThreadHandoff * selected_splits,
-                                                         unsigned int num_selected_splits)
+template<class BoolDecoder>
+CodingReturnValue VP8ComponentEncoder<BoolDecoder>::vp8_full_encoder(const UncompressedComponents * const colldata,
+                                                                     IOUtil::FileWriter *str_out,
+                                                                     const ThreadHandoff * selected_splits,
+                                                                     unsigned int num_selected_splits,
+                                                                     bool use_ans_encoder)
 {
     /* cmpc is a global variable with the component count */
     using namespace Sirikata;
@@ -472,61 +548,31 @@ CodingReturnValue VP8ComponentEncoder::vp8_full_encoder( const UncompressedCompo
 #endif
     
     ResizableByteBuffer stream[MuxReader::MAX_STREAM_ID];
-    BoolEncoder bool_encoder[MAX_NUM_THREADS];
-    Array1d<std::vector<NeighborSummary>,
-            (uint32_t)ColorChannel::NumBlockTypes> num_nonzeros[MAX_NUM_THREADS];
-    for (unsigned int thread_id = 0; thread_id < NUM_THREADS; ++thread_id) {
-        bool_encoder[thread_id].init();
-        for (size_t i = 0; i < num_nonzeros[thread_id].size(); ++i) {
-            num_nonzeros[thread_id].at(i).resize(colldata->block_width(i) << 1);
-        }
-    }
-
-    if (do_threading_) {
-        for (unsigned int thread_id = 1; thread_id < NUM_THREADS; ++thread_id) {
-            spin_workers_[thread_id - 1].work
-                = std::bind(&VP8ComponentEncoder::process_row_range, this,
-                            thread_id,
-                            colldata,
-                            selected_splits[thread_id].luma_y_start,
-                            selected_splits[thread_id].luma_y_end,
-                            &stream[thread_id],
-                            &bool_encoder[thread_id],
-                            &num_nonzeros[thread_id]);
-            spin_workers_[thread_id - 1].activate_work();
-        }
-    }
-    process_row_range(0,
-                      colldata,
-                      selected_splits[0].luma_y_start,
-                      selected_splits[0].luma_y_end,
-                      &stream[0],
-                      &bool_encoder[0],
-                      &num_nonzeros[0]);
-    if(!do_threading_) { // single threading
-        for (unsigned int thread_id = 1; thread_id < NUM_THREADS; ++thread_id) {
-            process_row_range(thread_id,
-                              colldata,
-                              selected_splits[thread_id].luma_y_start,
-                              selected_splits[thread_id].luma_y_end,
-                              &stream[thread_id],
-                              &bool_encoder[thread_id],
-                              &num_nonzeros[thread_id]);
-        }
-    }
-    static_assert(MAX_NUM_THREADS * SIMD_WIDTH <= MuxReader::MAX_STREAM_ID,
-                  "Need to have enough mux streams for all threads and simd width");
-
-    if (do_threading_) {
-        for (unsigned int thread_id = 1; thread_id < NUM_THREADS; ++thread_id) {
-            TimingHarness::timing[thread_id][TimingHarness::TS_THREAD_WAIT_STARTED] = TimingHarness::get_time_us();
-            spin_workers_[thread_id - 1].main_wait_for_done();
-            TimingHarness::timing[thread_id][TimingHarness::TS_THREAD_WAIT_FINISHED] = TimingHarness::get_time_us();
-        }
+    if (use_ans_encoder) {
+#ifdef ENABLE_ANS_EXPERIMENTAL
+        ANSBoolWriter bool_encoder[MAX_NUM_THREADS];
+        this->threaded_encode_inner(colldata,
+                                    str_out,
+                                    selected_splits,
+                                    num_selected_splits,
+                                    bool_encoder,
+                                    stream);
+#else
+        always_assert(false && "Need to enable ANS compile flag to include ANS");
+#endif
+    } else {
+    
+        VPXBoolWriter bool_encoder[MAX_NUM_THREADS];
+        this->threaded_encode_inner(colldata,
+                                    str_out,
+                                    selected_splits,
+                                    num_selected_splits,
+                                    bool_encoder,
+                                    stream);
     }
     TimingHarness::timing[0][TimingHarness::TS_STREAM_MULTIPLEX_STARTED] = TimingHarness::get_time_us();
 
-    Sirikata::MuxWriter mux_writer(str_out, JpegAllocator<uint8_t>());
+    Sirikata::MuxWriter mux_writer(str_out, JpegAllocator<uint8_t>(), ujgversion);
     size_t stream_data_offset[MuxReader::MAX_STREAM_ID] = {0};
     bool any_written = true;
     while (any_written) {
@@ -571,8 +617,8 @@ CodingReturnValue VP8ComponentEncoder::vp8_full_encoder( const UncompressedCompo
         const char * msg = "Writing new compression model...\n";
         while (write(2, msg, strlen(msg)) < 0 && errno == EINTR){}
 
-        std::get<(int)BlockType::Y>(middle).optimize(thread_state_[0]->model_);
-        std::get<(int)BlockType::Y>(middle).serialize(thread_state_[0]->model_, model_file_fd );
+        std::get<(int)BlockType::Y>(middle).optimize(this->thread_state_[0]->model_);
+        std::get<(int)BlockType::Y>(middle).serialize(this->thread_state_[0]->model_, model_file_fd );
     }
 #ifdef ANNOTATION_ENABLED
     {
@@ -584,3 +630,7 @@ CodingReturnValue VP8ComponentEncoder::vp8_full_encoder( const UncompressedCompo
     TimingHarness::timing[0][TimingHarness::TS_STREAM_FLUSH_FINISHED] = TimingHarness::get_time_us();
     return CODING_DONE;
 }
+template class VP8ComponentEncoder<VPXBoolReader>;
+#ifdef ENABLE_ANS_EXPERIMENTAL
+template class VP8ComponentEncoder<ANSBoolReader>;
+#endif

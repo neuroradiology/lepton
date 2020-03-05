@@ -26,7 +26,7 @@
  * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-#if defined (__linux) || defined (__APPLE__)
+#if defined (__linux__) || defined (__APPLE__) || defined(BSD)
 #define SIRIKATA_FUNCTION_EXPORT __attribute__ ((visibility("default")))
 #define SIRIKATA_EXPORT __attribute__ ((visibility("default")))
 #define SIRIKATA_PLUGIN_EXPORT __attribute__ ((visibility("default")))
@@ -56,21 +56,20 @@ typedef uint8_t byte;
 typedef int8_t int8;
 
 }
-#ifndef _DECODER_PLATFORM_HH_
-#define _DECODER_PLATFORM_HH_
+#ifndef DECODER_PLATFORM_HH_
+#define DECODER_PLATFORM_HH_
 #ifdef _WIN32
 #include <io.h>
-inline int write(int fd, const void*data, size_t length) {
+inline int write(int fd, const void*data, unsigned int length) {
     return _write(fd, data, length);
 }
-inline int read(int fd, void*data, size_t length) {
+inline int read(int fd, void*data, unsigned int length) {
     return _read(fd, data, length);
 }
 inline int close(int fd) {
     return _close(fd);
 }
 typedef int ssize_t;
-using std::size_t;
 #endif
 
 
